@@ -289,8 +289,7 @@ Windows (IPP Class Driver) --PWG raster over IPP/HTTP--> Kestrel --> spool file 
 
 ## License
 
-Add a `LICENSE` file before publishing (MIT or BSD-2 are the usual choices for this kind of project; the referenced
-macOS driver and iwiitool are MIT and were used as documentation only, no code was copied).
+This project is licensed under the [MIT License](LICENSE).
 
 ## Credits
 
