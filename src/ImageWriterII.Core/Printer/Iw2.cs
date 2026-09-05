@@ -29,6 +29,12 @@ public static class Iw2
     /// <summary>Paper motion resolution: line feeds are specified in 1/144 inch.</summary>
     public const int FeedUnitsPerInch = 144;
 
+    /// <summary>
+    /// Largest tear-off distance the service will wind the paper back. Beyond a few inches the sheet's
+    /// leading edge can travel back past the paper-out sensor, which makes the printer report no paper.
+    /// </summary>
+    public const double MaxTearOffInches = 6.0;
+
     /// <summary>Software reset (ESC c) takes up to three seconds; data sent during that time is lost.</summary>
     public static readonly TimeSpan ResetSettleTime = TimeSpan.FromSeconds(3.5);
 }

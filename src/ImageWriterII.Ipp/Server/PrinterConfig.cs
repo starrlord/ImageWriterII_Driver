@@ -114,6 +114,9 @@ public sealed class PrinterConfig
         _ = PwgMedia.Parse(MediaDefault);
         if (!MediaSupported.Contains(MediaDefault)) MediaSupported.Insert(0, MediaDefault);
         if (MarginLeftInches < Encoder.LeftEdgeOffsetInches) MarginLeftInches = Encoder.LeftEdgeOffsetInches;
+        // Winding back further than this can pull the sheet's edge off the paper-out sensor.
+        if (Encoder.TearOffInches < 0) Encoder.TearOffInches = 0;
+        if (Encoder.TearOffInches > Core.Printer.Iw2.MaxTearOffInches) Encoder.TearOffInches = Core.Printer.Iw2.MaxTearOffInches;
         if (HttpPort is <= 0 or > 65535) throw new InvalidOperationException("HttpPort out of range.");
     }
 }

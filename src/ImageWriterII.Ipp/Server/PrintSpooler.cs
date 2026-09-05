@@ -474,6 +474,8 @@ public sealed class PrintSpooler : BackgroundService
             FormFeedAtEnd = _cfg.Text.FormFeedAtEnd,
             Bidirectional = _cfg.Text.Bidirectional,
             WrapColumn = _cfg.Text.WrapColumn,
+            // One setting for both job kinds: tear-off is a property of the paper path, not of the encoder.
+            TearOffInches = _cfg.Encoder.TearOffInches,
             Raw = raw
         };
         if (job.PrintQuality == 5) o.Font = Iw2Font.NearLetterQuality;
@@ -498,6 +500,7 @@ public sealed class PrintSpooler : BackgroundService
         PreferGroupedGraphics = _cfg.Encoder.PreferGroupedGraphics,
         ColorRibbon = _cfg.ColorRibbon,
         ColorStrategy = _cfg.Encoder.ColorStrategy,
+        TearOffInches = _cfg.Encoder.TearOffInches,
         SetTopOfFormAtJobStart = _cfg.Encoder.SetTopOfFormAtJobStart,
         FormFeedAfterPage = _cfg.Encoder.FormFeedAfterPage
     };

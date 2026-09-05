@@ -17,11 +17,22 @@ public sealed class TextJobOptions
     public bool Raw { get; set; }
     /// <summary>Maximum characters per line before an automatic wrap; 0 = let the printer wrap.</summary>
     public int WrapColumn { get; set; } = 0;
+
+    /// <summary>Head-to-tear-edge distance; see <see cref="Encoder.Iw2EncoderOptions.TearOffInches"/>. 0 disables.</summary>
+    public double TearOffInches { get; set; } = 0.0;
 }
 
 /// <summary>Prints plain text with the printer's built-in fonts (line ending normalisation, tab expansion, form feed at end).</summary>
 public static class TextJobEncoder
 {
+    /// <summary>Tear-off distance in 1/144", clamped like the raster encoder's.</summary>
+    private static int TearOffUnits(TextJobOptions o) => o.TearOffInches <= 0
+        ? 0
+        : (int)System.Math.Round(System.Math.Min(o.TearOffInches, Iw2.MaxTearOffInches) * Iw2.FeedUnitsPerInch);
+
+    /// <summary>Runs the paper on so the perforation sits at the tear edge; the mirror of the prologue's wind back.</summary>
+    public static void WriteEpilogue(Iw2Writer w, TextJobOptions o) => w.Feed144ths(TearOffUnits(o));
+
     public static void WritePrologue(Iw2Writer w, TextJobOptions o)
     {
         w.StandardCharacterSet();
@@ -38,6 +49,8 @@ public static class TextJobEncoder
         w.ForwardLineFeed();
         w.LeftMargin(0);
         w.Color(Iw2Color.Black);
+        // Same tear-off handling as raster jobs: wind back to the top of the sheet before printing.
+        w.Feed144ths(TearOffUnits(o), reverse: true);
         if (o.LinesPerInch == 8) w.EightLinesPerInch(); else w.SixLinesPerInch();
         w.Pitch(o.Pitch);
         w.Font(o.Font);
@@ -53,6 +66,7 @@ public static class TextJobEncoder
         {
             w.Raw(text);
             if (o.FormFeedAtEnd && (text.IsEmpty || text[^1] != Iw2.FF)) w.FormFeed();
+            WriteEpilogue(w, o);
             return;
         }
 
@@ -102,6 +116,7 @@ public static class TextJobEncoder
         }
         if (column > 0) NewLine(w, ref column);
         if (o.FormFeedAtEnd && !lastWasFf) w.FormFeed();
+        WriteEpilogue(w, o);
     }
 
     private static void NewLine(Iw2Writer w, ref int column)

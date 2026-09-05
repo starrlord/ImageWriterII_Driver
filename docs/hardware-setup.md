@@ -67,6 +67,36 @@ Things to check:
   a job starts becomes the top of the page. Load paper so the print head is at the top edge of the
   sheet (the printer's paper-load position does this for single sheets; with fanfold paper set the
   perforation just above the head).
+* **Tearing off after every job.** The tear edge sits a few inches downstream of the print head, so once
+  you tear a sheet the top of the next one is left at the tear edge, with the head already several inches
+  into the page. Print again and that is where it starts, typically a quarter of the way down. Set
+  `Encoder.TearOffInches` to the head-to-tear-edge distance and the service handles it: it winds the paper
+  back that far before claiming top of form and runs it forward again at the end, so the perforation
+  finishes at the tear edge ready to tear and the next job still starts at the top of a sheet. With it
+  enabled, load paper with the **top of the sheet at the tear edge**, which is where tearing leaves it
+  anyway, and never touch the platen knob again.
+
+  **2.0 is the value to start with.** That is what was measured on a real ImageWriter II with the cable chain
+  in the README, and it is the point at which the perforation clears the tear edge far enough to tear cleanly.
+  Apple's own driver used the same mechanism with a slightly smaller gap: their developer note records that
+  "at the end of each print job, the paper is left positioned with the print-head roughly 1 inch from the
+  edge", rolling the paper backward at the start of the next job to reclaim it
+  (<https://developer.apple.com/library/archive/technotes/pr/pr_17.html>). One inch brings the perforation to
+  the bar; the extra inch gives you enough paper to grip.
+
+  Do not measure it by tearing a sheet off and seeing how far down the next print starts. That measures how
+  far *you* pulled the paper, which is always more than the minimum and differs every time. Measure the
+  printer instead:
+
+  1. Take the printer off line and use the platen knob to bring a spot of paper exactly level with the print
+     head. Pencil a tick there.
+  2. Wind forward until that tick sits exactly at the tear edge.
+  3. Pencil a second tick level with the print head now.
+  4. The gap between the two ticks is the distance.
+
+  Once this is enabled, stop pulling the paper by hand: the service parks the perforation at the tear edge
+  for you, and hand-pulling on top of that puts the next job back out of position. The value is clamped at 6
+  inches so the sheet's edge cannot be wound back off the paper-out sensor.
 * Left edge: the head's first dot column is 1/4" from the left edge of letter paper loaded against
   the paper guide. If output is shifted, adjust `Encoder.LeftEdgeOffsetInches` (bigger value moves
   the image left on the sheet). The `iwprint testpage` border makes this easy to measure.

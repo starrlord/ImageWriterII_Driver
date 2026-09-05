@@ -17,7 +17,7 @@ into the printer's native bit-image commands and uses **every graphics capabilit
 | Grouped graphics (ESC g) | faster printer parsing when literal runs are multiples of eight |
 | Four-colour ribbon (ESC K) | Y, M, C, K separation with grey-component replacement, yellow first as the manual says; **colour is the default** (`Ribbon`) |
 | Uni/bidirectional head motion (ESC > / <) | unidirectional by default for perfect interleave registration; draft quality switches to bidirectional |
-| Page length (ESC H), top of form (ESC v), reverse feed (ESC r) | any media from 2x2" to 8.5x17", per-page colour strategy for tractor paper |
+| Page length (ESC H), top of form (ESC v), reverse feed (ESC r) | any media from 2x2" to 8.5x17"; reverse feed drives the per-page colour strategy and the automatic tear-off positioning for tractor paper |
 | Software switches (ESC Z / ESC D) | forces no auto-LF, no perforation skip, 8-bit data regardless of the DIP switches |
 | Built-in fonts (ESC a, pitches, 6/8 lpi) | plain-text jobs print with the printer's own Draft / Correspondence / NLQ fonts |
 
@@ -290,6 +290,7 @@ If you have a black ribbon, say so — it is faster and avoids ribbon wear:
 | `Encoder.LeftEdgeOffsetInches` | where dot column 0 lands on the sheet (0.25" for letter against the guide) |
 | `Encoder.Bidirectional` | faster, unidirectional keeps the two 144-dpi passes perfectly registered |
 | `Encoder.ColorStrategy` | `PerBand` (default) or `PerPage` (tractor paper only) |
+| `Encoder.TearOffInches` | head-to-tear-edge distance for tractor paper torn off after each job; 0 disables (see `docs/hardware-setup.md`) |
 | `Halftone.Gamma`, `Mode` | dot-gain compensation (1.8) and Floyd-Steinberg / ordered / threshold |
 | `Text.Font`, `Pitch`, `LinesPerInch` | printer fonts for plain-text jobs (raw port, `text/plain` IPP jobs) |
 | `MediaSupported`, margins | PWG media names offered; 1/4" unprintable margins reported |
@@ -341,6 +342,13 @@ assets/                    screenshots and output photos used by this README
 * **Garbage or missing chunks.** Flow control is not working (see above). As a stop-gap set
   `Serial.MaxBytesPerSecond` to 600; the printer's 2K buffer then never overruns at print speed.
 * **Output shifted left/right.** Adjust `Encoder.LeftEdgeOffsetInches` using the test page border.
+* **Every print starts part-way down the page, typically about a quarter.** You are tearing sheets off. The
+  tear edge sits a few inches past the print head, so once you tear, the top of the next sheet is left at the
+  tear edge with the head already that far into the page, and top of form gets set there. Set
+  `Encoder.TearOffInches` to the head-to-tear-edge distance: the service then winds the paper back that far
+  before each job and runs it forward again afterwards, so the perforation ends at the tear edge ready to tear
+  and printing still starts at the top of the sheet. **2.0 works on a real ImageWriter II**; stop pulling the
+  paper by hand once it is on. Measuring procedure in `docs/hardware-setup.md`.
 * **Windows does not list the printer.** Add it by URL (step 3). Discovery on the same PC depends on
   Windows's own mDNS resolver; other machines on the LAN discover it normally.
 * **Prints in black although a colour ribbon is installed.** The service is configured for a black ribbon

@@ -64,7 +64,15 @@ public sealed class Iw2JobEncoder
         _w.ForwardLineFeed();
         _w.LeftMargin(0);
         if (_o.Bidirectional) _w.Bidirectional(); else _w.Unidirectional();
-        if (_o.ColorRibbon) SelectColor(Iw2Color.Black);
+        // Always select black, even when configured for a black ribbon. ESC K moves the ribbon shift, so
+        // skipping it leaves a four-colour ribbon on whatever band it was last parked on: a printer sitting
+        // on yellow would print a whole job in near-invisible yellow. It is harmless on a mono ribbon, black
+        // being the rest position, so send it unconditionally and make the starting state deterministic.
+        SelectColor(Iw2Color.Black);
+        // The paper is parked with the top of the sheet at the tear edge, because that is where the last
+        // job left it and also how fresh paper loads. Wind back to the top of the sheet before ESC v, so
+        // top of form means the top of the page rather than wherever the tear-off happened to leave it.
+        FeedTearOff(reverse: true);
         if (_o.SetTopOfFormAtJobStart) _w.SetTopOfForm();
         _buffer.Flush();
     }
@@ -73,7 +81,10 @@ public sealed class Iw2JobEncoder
     public void EndJob()
     {
         if (!_jobStarted) return;
-        if (_o.ColorRibbon) SelectColor(Iw2Color.Black);
+        // Leave the ribbon on black for whatever prints next, including the printer's own self test.
+        SelectColor(Iw2Color.Black);
+        // Present the perforation at the tear edge so the sheet tears off without anyone touching the knob.
+        FeedTearOff(reverse: false);
         _w.SixLinesPerInch();
         _currentSpacing = -1;
         _w.Bidirectional();
@@ -193,7 +204,7 @@ public sealed class Iw2JobEncoder
                 {
                     int end = FillColumns(plane, y0, pass, passes, colOffset, columns, cols);
                     if (end == 0) continue;
-                    if (inks.Count > 1 || _o.ColorRibbon) SelectColor(InkToColor(ink));
+                    SelectColor(InkToColor(ink));   // deduplicated, so a mono job emits ESC K once per job
                     EmitLine(cols.AsSpan(0, end));
                     _w.CarriageReturn();
                 }
@@ -315,6 +326,19 @@ public sealed class Iw2JobEncoder
             _w.LineFeed();
             _pendingFeed -= step;
         }
+    }
+
+    /// <summary>Tear-off distance in 1/144", clamped so the paper's edge cannot be wound off the sensor.</summary>
+    private int TearOffUnits => _o.TearOffInches <= 0
+        ? 0
+        : (int)Math.Round(Math.Min(_o.TearOffInches, Iw2.MaxTearOffInches) * Iw2.FeedUnitsPerInch);
+
+    private void FeedTearOff(bool reverse)
+    {
+        int units = TearOffUnits;
+        if (units == 0) return;
+        _w.Feed144ths(units, reverse);
+        _currentSpacing = -1;   // Feed144ths sets ESC T itself, so the cached spacing is now stale
     }
 
     private void ReverseFeed(int units)

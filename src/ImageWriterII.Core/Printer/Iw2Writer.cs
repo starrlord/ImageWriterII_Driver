@@ -57,6 +57,24 @@ public sealed class Iw2Writer
         Esc('T', nn.ToString("00"));
     }
 
+    /// <summary>
+    /// Feeds the paper by a distance in 1/144", forwards or in reverse, and leaves the printer feeding
+    /// forwards again. ESC T only carries two digits, so long distances go out as several feeds.
+    /// </summary>
+    public void Feed144ths(int units, bool reverse = false)
+    {
+        if (units <= 0) return;
+        if (reverse) ReverseLineFeed();
+        while (units > 0)
+        {
+            int step = Math.Min(99, units);
+            LineSpacing144ths(step);
+            LineFeed();
+            units -= step;
+        }
+        if (reverse) ForwardLineFeed();
+    }
+
     public void SixLinesPerInch() => Esc('A');
     public void EightLinesPerInch() => Esc('B');
     public void ForwardLineFeed() => Esc('f');

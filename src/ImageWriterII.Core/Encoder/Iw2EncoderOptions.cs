@@ -43,4 +43,15 @@ public sealed class Iw2EncoderOptions
 
     /// <summary>Send a form feed after the last page of the job (always true for pages; kept for raw jobs).</summary>
     public bool FormFeedAfterPage { get; set; } = true;
+
+    /// <summary>
+    /// Distance from the print head to the printer's tear edge, for tractor paper that gets torn off after
+    /// every job. When set, each job winds the paper back this far before claiming top of form and runs it
+    /// forward again afterwards, so the perforation ends up at the tear edge ready to tear.
+    ///
+    /// Deliberately symmetric and stateless: loading fresh paper and tearing a sheet off both leave the top
+    /// of the next sheet sitting at the tear edge, so every job can assume that same starting position and
+    /// no state has to survive between jobs or across a service restart. 0 disables it.
+    /// </summary>
+    public double TearOffInches { get; set; } = 0.0;
 }
