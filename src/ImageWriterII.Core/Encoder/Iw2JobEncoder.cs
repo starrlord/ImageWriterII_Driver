@@ -140,9 +140,13 @@ public sealed class Iw2JobEncoder
                 EncodeBands(page, [inks[i]], cols, colOffset, columns, passes, bandRows, bands, ct);
                 if (i < inks.Count - 1)
                 {
-                    // Rewind to the top of the page for the next ink.
+                    // Rewind to the top of the page for the next ink. _advancedSincePageTop counts feed that
+                    // was *intended*; _pendingFeed is the tail of it that no FlushFeed ever turned into bytes
+                    // (the last band's trailing feed plus every trailing blank band), so the paper never moved
+                    // that far. Rewinding by the full amount would drag each successive ink back past the one
+                    // before it, compounding to inches on a page with a blank lower half.
+                    ReverseFeed(_advancedSincePageTop - _pendingFeed);
                     _pendingFeed = 0;
-                    ReverseFeed(_advancedSincePageTop);
                     _advancedSincePageTop = 0;
                 }
             }

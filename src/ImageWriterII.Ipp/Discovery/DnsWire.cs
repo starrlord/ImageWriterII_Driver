@@ -92,7 +92,7 @@ public static class DnsWire
     public static byte[] EncodeName(string name)
     {
         var list = new List<byte>();
-        foreach (var label in name.TrimEnd('.').Split('.'))
+        foreach (var label in SplitLabels(name))
         {
             if (label.Length == 0) continue;
             var bytes = Encoding.UTF8.GetBytes(label);
@@ -102,6 +102,26 @@ public static class DnsWire
         }
         list.Add(0);
         return list.ToArray();
+    }
+
+    /// <summary>
+    /// Splits a name into labels on unescaped dots and unescapes "\." within a label. DNS-SD instance names
+    /// are allowed to contain dots ("Joe's 3.5 Printer") and RFC 6763 section 4.3 escapes them this way; a
+    /// plain Split('.') would silently turn one instance into two labels and break the service name.
+    /// </summary>
+    private static List<string> SplitLabels(string name)
+    {
+        var labels = new List<string>();
+        var current = new StringBuilder();
+        for (int i = 0; i < name.Length; i++)
+        {
+            char c = name[i];
+            if (c == '\\' && i + 1 < name.Length) { current.Append(name[++i]); continue; }
+            if (c == '.') { labels.Add(current.ToString()); current.Clear(); continue; }
+            current.Append(c);
+        }
+        if (current.Length > 0) labels.Add(current.ToString());
+        return labels;
     }
 
     public static string ReadName(ReadOnlySpan<byte> packet, ref int offset)

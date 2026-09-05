@@ -28,9 +28,13 @@ public sealed class FileLoggerProvider : ILoggerProvider
             {
                 _writer?.Dispose();
                 _writer = new StreamWriter(Path.Combine(_directory, $"imagewriter-{today:yyyyMMdd}.log"), append: true, Encoding.UTF8) { AutoFlush = true };
+                bool rolled = _writerDate != default;
                 _writerDate = today;
+                // Prune on every roll, not only at startup: this service is meant to run for months.
+                if (rolled) CleanOld();
             }
-            _writer.WriteLine(line);
+            // Job and user names come from the network; a newline in one would forge log lines.
+            _writer.WriteLine(line.ReplaceLineEndings(" "));
         }
     }
 

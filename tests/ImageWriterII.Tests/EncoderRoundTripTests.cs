@@ -186,4 +186,77 @@ public class EncoderRoundTripTests
         Assert.Equal(1, pages[0].Dots);
         Assert.True(pages[0].Black.Get((int)Math.Round((0.25 + (500 - 36) / 144.0) * 144), 1500));
     }
+
+    /// <summary>
+    /// PerPage colour rewinds the paper between inks. The rewind must match what was actually fed, not what
+    /// the encoder intended: feed for the last band and for every trailing blank band is still pending and
+    /// was never emitted, so counting it would drag magenta, cyan and black progressively back past the top
+    /// of form. A page with a blank lower half makes that remainder large enough to be unmistakable.
+    /// </summary>
+    [Fact]
+    public void ColorPerPageWithBlankLowerHalfKeepsInksRegistered()
+    {
+        int dpi = 144;
+        int w = (int)(8.5 * dpi), h = (int)(6.0 * dpi);
+        int inked = (int)(1.5 * dpi);   // only the top 1.5" carries dots; the rest is blank bands
+
+        BitPlane TopOnly(int seed)
+        {
+            var plane = new BitPlane(w, h);
+            var rng = new Random(seed);
+            for (int y = 0; y < inked; y++)
+                for (int x = 0; x < w; x++)
+                    if (rng.NextDouble() < 0.08) plane.Set(x, y);
+            return plane;
+        }
+
+        var y0 = TopOnly(11);
+        var m0 = TopOnly(12);
+        var c0 = TopOnly(13);
+        var k0 = TopOnly(14);
+        var page = new RasterPage { DpiX = dpi, DpiY = dpi, Black = k0, Yellow = y0, Magenta = m0, Cyan = c0, MediaWidthPoints = 612, MediaHeightPoints = 792 };
+        var o = new Iw2EncoderOptions { ColorRibbon = true, ColorStrategy = ColorStrategy.PerPage, LeftEdgeOffsetInches = LeftOffset };
+        var bytes = Encode(page, o);
+
+        var sim = new Iw2Simulator(new SimulatorOptions { DpiX = dpi, DpiY = dpi, LeftEdgeOffsetInches = LeftOffset, PageHeightInches = 11 });
+        var pages = sim.Run(bytes);
+
+        // The old code rewound by the intended feed and asked the printer to reverse past top of form.
+        Assert.Equal(0, sim.OverReversedUnits);
+        Assert.Single(pages);
+        Assert.Empty(pages[0].Warnings);
+        int colOffset = (int)Math.Round(LeftOffset * dpi);
+        AssertPlaneMatches(y0, pages[0].Yellow, dpi, dpi, colOffset, dpi * 8);
+        AssertPlaneMatches(m0, pages[0].Magenta, dpi, dpi, colOffset, dpi * 8);
+        AssertPlaneMatches(c0, pages[0].Cyan, dpi, dpi, colOffset, dpi * 8);
+        AssertPlaneMatches(k0, pages[0].Black, dpi, dpi, colOffset, dpi * 8);
+    }
+
+    /// <summary>An all-blank ink plane must not make the rewind go backwards past the top of form either.</summary>
+    [Fact]
+    public void ColorPerPageWithAnEmptyInkPlaneDoesNotOverReverse()
+    {
+        int dpi = 144;
+        int w = (int)(8.5 * dpi), h = (int)(3.0 * dpi);
+        var k0 = RandomPlane(w, h, 21, 0.10, false);
+        var page = new RasterPage
+        {
+            DpiX = dpi,
+            DpiY = dpi,
+            Black = k0,
+            Yellow = new BitPlane(w, h),      // empty
+            Magenta = new BitPlane(w, h),     // empty
+            Cyan = new BitPlane(w, h),        // empty
+            MediaWidthPoints = 612,
+            MediaHeightPoints = 792
+        };
+        var o = new Iw2EncoderOptions { ColorRibbon = true, ColorStrategy = ColorStrategy.PerPage, LeftEdgeOffsetInches = LeftOffset };
+
+        var sim = new Iw2Simulator(new SimulatorOptions { DpiX = dpi, DpiY = dpi, LeftEdgeOffsetInches = LeftOffset, PageHeightInches = 11 });
+        var pages = sim.Run(Encode(page, o));
+
+        Assert.Equal(0, sim.OverReversedUnits);
+        Assert.Single(pages);
+        AssertPlaneMatches(k0, pages[0].Black, dpi, dpi, (int)Math.Round(LeftOffset * dpi), dpi * 8);
+    }
 }

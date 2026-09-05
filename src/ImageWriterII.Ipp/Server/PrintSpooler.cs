@@ -169,20 +169,27 @@ public sealed class PrintSpooler : BackgroundService
         {
             _log.LogInformation("Cancelled {Job}", job);
             job.SetState(IppJobState.Canceled, "job-canceled-by-user");
-            AbortPrinterOutput();
+            RecoverPrinter("cancel");
             Status.Set(IppPrinterState.Idle, "Ready");
         }
         catch (OperationCanceledException)
         {
+            // Shutdown cut the job mid-page: the printer is very likely counting down a graphics run, and
+            // nothing later clears that (BeginJob deliberately never sends ESC c), so recover here too.
             job.SetState(IppJobState.Aborted, "job-aborted-by-system", "printer-stopped");
+            RecoverPrinter("shutdown");
             Status.Set(IppPrinterState.Stopped, "Service stopping", "shutdown");
         }
         catch (Exception ex)
         {
             _log.LogError(ex, "Job {Job} failed", job);
             job.StateMessage = ex.Message;
-            job.SetState(IppJobState.Aborted, "job-aborted-by-system", "unsupported-document-format");
-            ResetPort();
+            // "unsupported-document-format" is only right when the document really was undecodable; an I/O
+            // failure on the port is a device error and clients act on the difference.
+            bool badDocument = ex is InvalidDataException or NotSupportedException or FormatException or EndOfStreamException;
+            job.SetState(IppJobState.Aborted, "job-aborted-by-system",
+                badDocument ? "unsupported-document-format" : "printer-stopped");
+            RecoverPrinter($"job {job.Id} failure");
             Status.Set(IppPrinterState.Stopped, $"Job {job.Id} failed: {ex.Message}", "other");
         }
         finally
@@ -191,9 +198,39 @@ public sealed class PrintSpooler : BackgroundService
             Status.NotifyChanged();
             if (job.SpoolPath is not null)
             {
-                try { File.Delete(job.SpoolPath); } catch (Exception) { /* ignore */ }
+                // Keep the document of a job that failed to decode: without it there is nothing left to
+                // diagnose a client whose raster we cannot read. Program.cs clears the spool dir at startup.
+                if (job.State == IppJobState.Aborted && job.StateReasons.Contains("unsupported-document-format"))
+                    KeepFailedDocument(job);
+                try { if (job.SpoolPath is not null) File.Delete(job.SpoolPath); } catch (Exception) { /* ignore */ }
                 job.SpoolPath = null;
             }
+        }
+    }
+
+    private void KeepFailedDocument(PrintJob job)
+    {
+        try
+        {
+            string ext = job.Kind switch
+            {
+                JobDocumentKind.AppleRaster => "urf",
+                JobDocumentKind.PwgRaster => "pwg",
+                JobDocumentKind.Text => "txt",
+                _ => "bin"
+            };
+            string kept = Path.Combine(_cfg.SpoolDirectory, $"failed-job{job.Id}.{ext}");
+            using (var src = File.OpenRead(job.SpoolPath!))
+            using (var dst = File.Create(kept))
+            {
+                src.Position = job.DocumentOffset;   // skip the IPP request that precedes the document
+                src.CopyTo(dst);
+            }
+            _log.LogWarning("Kept the undecodable document of job {Id} at {Path} ({Bytes} bytes) for diagnosis", job.Id, kept, job.DocumentBytes);
+        }
+        catch (Exception ex)
+        {
+            _log.LogDebug(ex, "Could not keep the failed document of job {Id}", job.Id);
         }
     }
 
@@ -223,8 +260,10 @@ public sealed class PrintSpooler : BackgroundService
         bool stalled = false;
         while (!printTask.IsCompleted)
         {
-            try { await Task.WhenAny(printTask, Task.Delay(TimeSpan.FromSeconds(2), ct)); }
-            catch (OperationCanceledException) { break; }
+            // Not ct: once cancelled, Task.Delay(ct) completes instantly and Task.WhenAny never throws, so
+            // passing ct here spins a core until the print thread notices. Check the token explicitly instead.
+            if (ct.IsCancellationRequested) break;
+            await Task.WhenAny(printTask, Task.Delay(TimeSpan.FromSeconds(2), CancellationToken.None));
             if (printTask.IsCompleted) break;
             if (job.BandsDone != lastBands) { lastBands = job.BandsDone; lastChange = DateTime.UtcNow; if (stalled) { stalled = false; Status.Set(IppPrinterState.Processing, $"Printing job {job.Id}: {job.Name}"); Status.NotifyChanged(); } continue; }
             if (!stalled && (DateTime.UtcNow - lastChange).TotalSeconds > 20 && !port.IsReady)
@@ -237,31 +276,67 @@ public sealed class PrintSpooler : BackgroundService
         }
     }
 
-    /// <summary>After a cancel the printer may be waiting for graphics bytes; a reset gets it out of that state.</summary>
-    private void AbortPrinterOutput()
+    /// <summary>
+    /// The longest literal graphics run the encoder can emit (ESC G nnnn is capped by the pitch's column
+    /// count, 160 dpi x 8" = 1280). A job cut short mid-run leaves the printer counting down that many
+    /// data bytes, so the reset has to be preceded by at least this much filler or it is eaten as image data.
+    /// </summary>
+    private const int GraphicsFillerBytes = 1400;
+
+    /// <summary>
+    /// Puts the printer back in a known state after a job was cancelled, failed, or was cut off by shutdown.
+    /// Bounded and non-blocking by construction: a printer that is off-line will be reset by its own power
+    /// cycle anyway, and blocking here would wedge the single-threaded spooler loop for as long as it stays off.
+    /// </summary>
+    private void RecoverPrinter(string reason)
     {
         ResetPort();
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+        IPrinterPort? port = null;
         try
         {
-            var port = _portFactory();
+            port = _portFactory();
             port.Open();
+            port.WriteCancellation = cts.Token;
+            if (!port.IsReady)
+            {
+                // Nothing can be sent to a printer that is not raising its ready line; do not park the
+                // spooler waiting for it. Closing the port is the best we can do.
+                _log.LogWarning("Printer not ready after {Reason}; skipping the reset ({Lines})", reason, port.LineStatus);
+                port.Dispose();
+                return;
+            }
             _port = port;
             Status.PortOpen = true;
+
             var buf = new ArrayBufferWriter<byte>();
             var w = new Iw2Writer(buf);
+            // Satisfy any outstanding ESC G / ESC V byte count first, otherwise ESC c is consumed as graphics data.
+            port.Write(new byte[GraphicsFillerBytes]);
+            w.CarriageReturn();
             w.Reset();
             port.Write(buf.WrittenSpan);
             port.Flush();
-            Thread.Sleep(Iw2.ResetSettleTime);
+            cts.Token.WaitHandle.WaitOne(Iw2.ResetSettleTime);
+            cts.Token.ThrowIfCancellationRequested();
             buf.Clear();
             w.FormFeed();
             port.Write(buf.WrittenSpan);
             port.Flush();
         }
+        catch (OperationCanceledException)
+        {
+            _log.LogWarning("Printer reset after {Reason} timed out; closing the port", reason);
+            ResetPort();
+        }
         catch (Exception ex)
         {
-            _log.LogWarning(ex, "Could not reset the printer after cancel");
+            _log.LogWarning(ex, "Could not reset the printer after {Reason}", reason);
             ResetPort();
+        }
+        finally
+        {
+            if (_port is not null) _port.WriteCancellation = CancellationToken.None;
         }
     }
 

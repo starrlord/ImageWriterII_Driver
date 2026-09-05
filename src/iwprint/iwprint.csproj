@@ -1,6 +1,10 @@
 <Project Sdk="Microsoft.NET.Sdk">
   <PropertyGroup>
     <OutputType>Exe</OutputType>
+    <!-- Windows-only by design (System.Drawing, Windows services, EventLog, serial DCB P/Invoke).
+         Declaring it in the TFM is what makes the platform-compatibility analyzer (CA1416) correct
+         rather than suppressed: it now knows every call site here only ever runs on Windows. -->
+    <TargetFramework>net10.0-windows</TargetFramework>
     <RootNamespace>ImageWriterII.Cli</RootNamespace>
     <AssemblyName>iwprint</AssemblyName>
     <Description>Command-line tool for the ImageWriter II: print text/images/test pages, query the printer, render escape streams, drive the IPP service.</Description>

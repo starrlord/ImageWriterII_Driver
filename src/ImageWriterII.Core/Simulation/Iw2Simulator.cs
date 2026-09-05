@@ -86,6 +86,12 @@ public sealed class Iw2Simulator
 
     public List<string> Log { get; } = [];
 
+    /// <summary>
+    /// Total 1/144" units the stream tried to reverse-feed past the top of form. Always 0 for a correct
+    /// stream; non-zero means the encoder rewound further than it had actually advanced the paper.
+    /// </summary>
+    public int OverReversedUnits { get; private set; }
+
     public IReadOnlyList<SimulatedPage> Run(ReadOnlySpan<byte> data)
     {
         int i = 0;
@@ -274,7 +280,14 @@ public sealed class Iw2Simulator
     private void Feed(int units)
     {
         _y144 += _reverse ? -units : units;
-        if (_y144 < 0) _y144 = 0;
+        if (_y144 < 0)
+        {
+            // A real printer cannot reverse past the paper it has fed, so a stream that asks it to has an
+            // arithmetic bug (this is how the PerPage colour rewind used to misregister). Record it rather
+            // than clamping silently, so round-trip tests can assert on it.
+            OverReversedUnits += -_y144;
+            _y144 = 0;
+        }
         if (_y144 >= _pageLength144)
         {
             // Ran off the bottom of the form: the printer keeps going onto the next sheet.

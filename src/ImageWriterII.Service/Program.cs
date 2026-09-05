@@ -83,8 +83,9 @@ async Task HandleIpp(HttpContext http)
     IppMessage request;
     long docOffset, docLength;
     // Buffer the whole request (IPP message + document) to the spool file, then parse the IPP part.
-    await using (var file = new FileStream(spoolPath, FileMode.CreateNew, FileAccess.ReadWrite, FileShare.Read, 1 << 16, useAsync: true))
+    try
     {
+        await using var file = new FileStream(spoolPath, FileMode.CreateNew, FileAccess.ReadWrite, FileShare.Read, 1 << 16, useAsync: true);
         await http.Request.Body.CopyToAsync(file, ct);
         file.Position = 0;
         try
@@ -102,6 +103,13 @@ async Task HandleIpp(HttpContext http)
         }
         docOffset = file.Position;
         docLength = file.Length - docOffset;
+    }
+    catch (Exception)
+    {
+        // A client that disappears mid-upload (or a full disk) must not leave the partial spool file behind;
+        // it would otherwise sit there until the next service restart clears the directory.
+        try { File.Delete(spoolPath); } catch (Exception) { /* ignore */ }
+        throw;
     }
 
     var ctx = new IppRequestContext
@@ -124,6 +132,17 @@ async Task HandleIpp(HttpContext http)
     log.LogInformation("IPP {Operation} from {Remote} ({User}) -> {Status} in {Ms} ms{Doc}",
         request.Operation, ctx.RemoteAddress, request.GetString(IppTag.OperationAttributes, "requesting-user-name") ?? "-",
         response.Status, sw.ElapsedMilliseconds, docLength > 0 ? $", {docLength:N0} bytes of document data" : "");
+    if (docLength > 0)
+    {
+        // A short upload and a bad decoder look identical once the bytes are gone; record what the client
+        // said it was sending so the two can be told apart from the log alone.
+        log.LogInformation("  document transfer: Content-Length {Len}, Transfer-Encoding {Te}, compression {Comp}, format {Fmt}, received {Got:N0} bytes",
+            http.Request.ContentLength?.ToString() ?? "(none)",
+            http.Request.Headers.TransferEncoding.ToString() is { Length: > 0 } te ? te : "(none)",
+            request.GetString(IppTag.OperationAttributes, "compression") ?? "none",
+            request.GetString(IppTag.OperationAttributes, "document-format") ?? "-",
+            docLength);
+    }
 }
 
 app.MapPost("/ipp/print", HandleIpp);

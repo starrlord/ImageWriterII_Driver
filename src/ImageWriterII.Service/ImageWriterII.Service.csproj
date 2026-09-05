@@ -1,6 +1,10 @@
 <Project Sdk="Microsoft.NET.Sdk.Web">
   <PropertyGroup>
     <OutputType>Exe</OutputType>
+    <!-- Windows-only by design (System.Drawing, Windows services, EventLog, serial DCB P/Invoke).
+         Declaring it in the TFM is what makes the platform-compatibility analyzer (CA1416) correct
+         rather than suppressed: it now knows every call site here only ever runs on Windows. -->
+    <TargetFramework>net10.0-windows</TargetFramework>
     <RootNamespace>ImageWriterII.Service</RootNamespace>
     <AssemblyName>ImageWriterII.Service</AssemblyName>
     <Description>IPP Everywhere print service for the Apple ImageWriter II (Windows service).</Description>

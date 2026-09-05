@@ -25,81 +25,82 @@ Everything is derived from the *Apple ImageWriter II Technical Reference Manual*
 `docs/printer-protocol.md`), and every escape stream the encoder produces is checked dot-for-dot
 by a built-in printer simulator in the unit tests.
 
-## Printer Status
-<img src="assets/printer_status.png" width="460" alt="Printer Status">
+The service's own status page, which is also what `printer-more-info` and the Bonjour `adminurl` point at:
 
+<img src="assets/printer_status.png" width="460" alt="The service's status page, showing printer state, ribbon, resolutions and the job list">
 
+Requires the .NET 10 SDK to build (`dotnet build ImageWriterII.slnx`) and the .NET 10 runtime to run.
 
-## Hardware I Used for Printer to PC
+## Hardware: connecting the printer to the PC
 
-The following hardware was used to connect the printer's **Mini-DIN 8 serial interface** to a modern PC via USB.
+The ImageWriter II has a **Mini-DIN-8 serial port**, so it needs a cable and a USB serial adapter to reach a
+modern PC. Any chain works as long as it satisfies the two electrical requirements below — the specific parts
+here are simply the combination this project was developed and verified against.
 
-## Required Hardware
-
-1. **KENTEK Mini-DIN 8 to DB25 Printer Cable — 6 ft**
-
-   * Mini-DIN 8 → DB25
-   * Male → Male
-   * 28 AWG
-   * Designed for ImageWriter I / RS-232 serial connections
-   * [View on Amazon](https://www.amazon.com/dp/B07WK2LZDD)
-
-2. **CableWholesale DB9 Female to DB25 Female Serial Adapter**
-
-   * DB9 Female → DB25 Female
-   * Provides the necessary connection between the printer cable and USB serial adapter
-   * [View on Amazon](https://www.amazon.com/dp/B000I96390)
-
-3. **DTECH USB to Serial Adapter — 6 ft**
-
-   * USB → DB9 RS-232 Male
-   * **FTDI FT232RL chipset**
-   * Supports Windows 11/10/8/7, macOS, and Linux
-   * [View on Amazon](https://www.amazon.com/dp/B08T92M9KP)
-
-### Connection Chain
-
-`Printer → Mini-DIN 8 → DB25 → DB9 → USB → PC`
-
-### Complete Setup
-
-**Printer**
-↓
-**KENTEK Mini-DIN 8 → DB25 Cable**
-↓
-**CableWholesale DB25 → DB9 Adapter**
-↓
-**DTECH FTDI USB → Serial Adapter**
-↓
-**PC**
-
-
-
-## Contents
+### The chain
 
 ```
-src/ImageWriterII.Core     printer command set, PWG/URF raster decoding, halftoning, encoder, simulator, serial port
-src/ImageWriterII.Ipp      IPP protocol, printer object, job spooler, DNS-SD (mDNS) responder, raw TCP 9100 port
-src/ImageWriterII.Service  the Windows service / console host (Kestrel on port 631, status page)
-src/iwprint                command-line tool: test pages, images, text, identity query, render, IPP client, mDNS browse
-tests/                     xunit tests (encoder round trips through the simulator, codecs, IPP, DNS)
-scripts/                   install-service.ps1, uninstall-service.ps1, add-printer.ps1, remove-printer.ps1
-docs/                      hardware-setup.md (cable, DIP switches), printer-protocol.md (what is sent and why)
+Apple ImageWriter II
+      │  Mini-DIN-8  (the printer's serial port)
+      ▼
+KENTEK Mini-DIN-8 → DB-25 cable          6 ft, male–male, 28 AWG
+      │  DB-25
+      ▼
+CableWholesale DB-25 → DB-9 adapter      female–female
+      │  DB-9
+      ▼
+DTECH USB → RS-232 adapter               FTDI FT232RL chipset
+      │  USB
+      ▼
+Windows 11 PC                            appears as COM1
 ```
 
-Requires the .NET 10 SDK to build (`dotnet build ImageWriterII.slnx`), .NET 10 runtime to run.
+| Part | Description | Link |
+|---|---|---|
+| KENTEK Mini-DIN-8 to DB25 printer cable, 6 ft | Male to male, 28 AWG. Sold for ImageWriter I / RS-232. | [Amazon](https://www.amazon.com/dp/B07WK2LZDD) |
+| CableWholesale DB9 female to DB25 female adapter | Joins the printer cable to the USB serial adapter. | [Amazon](https://www.amazon.com/dp/B000I96390) |
+| DTECH USB to serial adapter, 6 ft | USB to DB-9 RS-232 male, FTDI FT232RL. | [Amazon](https://www.amazon.com/dp/B08T92M9KP) |
+
+On this chain the printer's ready/busy signal arrives on **DSR**, so `Handshake: Auto` selects DSR hardware
+handshake — `iwprint status` reports exactly that. An FTDI chipset is worth insisting on: it honours the
+control line in hardware, within the printer's 27-character grace period, so a full page never overruns
+the printer's 2 KB buffer.
+
+### What actually matters
+
+Two things, whatever parts you use:
+
+1. **The printer's DTR (Mini-DIN-8 pin 2) must reach the PC** on CTS, DSR or DCD. That is the ready/busy line;
+   without it the PC cannot tell when to stop sending and pages come out garbled. `Handshake: Auto` detects
+   which of the three it landed on.
+2. **DIP switches at their factory settings**: 9600 baud (SW2-1 and SW2-2 closed) and hardware handshake
+   (SW2-3 open). The service overrides every SW1 function in software, so those do not matter.
+
+Cables of this shape are usually listed for the **ImageWriter I** — the one in the table above is, and it
+works fine here. But the name covers two different wirings: some are straight through (what you want) and
+some are wired as null-modems, because the ImageWriter I was a DTE. A crossed one leaves the ready line
+looking perfectly healthy and still prints nothing, and the fix is a DB-25 null-modem adapter in the chain.
+`docs/hardware-setup.md` has the full pinout, the baud-rate switch table, and how to tell the two apart.
+
+Only the self-identification query (`iwprint identify`, and `Ribbon: Auto`) needs the printer-to-PC data
+line, Mini-DIN-8 pin 5. Most cables of this kind omit it, which is why the service
+[defaults to a colour ribbon](#colour-printing) rather than trying to detect one.
 
 ## Quick start
 
-1. **Hardware.** Printer DIP switches at factory settings: 9600 baud (SW2-1 and SW2-2 closed),
-   hardware handshake (SW2-3 open). Cable: Mini-DIN-8 to RS-232 with the printer's **DTR (pin 2)
-   reaching the PC on CTS, DSR or DCD** (the service detects which). Details and pinout in
-   `docs/hardware-setup.md`. Check the link:
+1. **Check the link.** Wire it up as described under [Hardware](#hardware-connecting-the-printer-to-the-pc),
+   switch the printer on and make sure the **Select** light is lit, then:
 
    ```
    iwprint status --port COM1      # shows CTS/DSR/DCD; one must be high when the printer is on and selected
-   iwprint identify --port COM1    # prints e.g. "IW10C: ImageWriter, 10-inch carriage, colour ribbon" (needs the printer->PC data line)
+   iwprint identify --port COM1    # "IW10C: ImageWriter, 10-inch carriage, colour ribbon" (needs the printer->PC data line)
    ```
+
+   If no line is high, the printer is off or deselected, or the cable does not carry DTR. `identify`
+   answering "no answer" is normal and harmless — most cables omit the return line.
+
+   Step 2 puts `iwprint.exe` in `.\publish` and in the install directory. Before the first install, run it
+   from the source tree instead: `dotnet run --project src\iwprint -- status --port COM1`.
 
 2. **Install the service** (elevated PowerShell, from the repository root):
 
@@ -220,8 +221,11 @@ Private and you would rather it stayed that way.
 * **The job appears in the iOS queue and never finishes.** The printer is offline, out of paper, or
   deselected — the service blocks on the serial flow-control line and resumes by itself. The status page
   says which.
-* **It prints in black although a colour ribbon is fitted.** The service is configured for a black ribbon,
-  so it advertised `Color=F` and iOS sent grayscale. See [Colour printing](#colour-printing).
+* **It prints in black although a colour ribbon is fitted.** Two different causes. Either the service is
+  configured for a black ribbon, so it advertised `Color=F` and iOS sent grayscale — see
+  [Colour printing](#colour-printing). Or iOS is simply set to print in mono: tap *Options* in the print
+  sheet and turn **Black & White** off. The service logs which colour space each job actually arrived in
+  (`Srgb/24 bpp` for colour, `Sw/8 bpp` for grayscale), so the log settles it.
 * **Everything works from a Mac but not an iPhone (or vice versa).** Check that both are on the same SSID —
   many routers put 2.4 GHz and 5 GHz, or a guest network, on separate isolated segments.
 
@@ -304,6 +308,19 @@ Windows (IPP Class Driver) --PWG raster over IPP/HTTP--> Kestrel --> spool file 
   `_print._sub._ipp._tcp`, `_pdl-datastream._tcp` and `_http._tcp` with the address of the interface the query
   came in on. `iwprint mdns` browses like `dns-sd -B`.
 
+### Source layout
+
+```
+src/ImageWriterII.Core     printer command set, PWG/URF raster decoding, halftoning, encoder, simulator, serial port
+src/ImageWriterII.Ipp      IPP protocol, printer object, job spooler, DNS-SD (mDNS) responder, raw TCP 9100 port
+src/ImageWriterII.Service  the Windows service / console host (Kestrel on port 631, status page)
+src/iwprint                command-line tool: test pages, images, text, identity query, render, IPP client, mDNS browse
+tests/                     xunit tests (encoder round trips through the simulator, codecs, IPP, DNS)
+scripts/                   install-service.ps1, uninstall-service.ps1, add-printer.ps1, remove-printer.ps1
+docs/                      hardware-setup.md (cable, DIP switches), printer-protocol.md (what is sent and why)
+assets/                    screenshots used by this README
+```
+
 ## Troubleshooting
 
 * **Nothing prints, job stays "Printing", no TX light on the USB adapter.** Flow control is waiting on a
@@ -335,11 +352,15 @@ Windows (IPP Class Driver) --PWG raster over IPP/HTTP--> Kestrel --> spool file 
   adding the queue by URL always works.
 * One document per job; copies are handled by re-sending pages.
 * DSR-based hardware handshake uses the Windows serial API; on other platforms `Auto` falls back to software gating.
-* Tested on one ImageWriter II with an FTDI USB adapter. Reports from other cables and adapters are welcome.
+* Verified on one ImageWriter II over the cable chain above: colour printing from Windows and colour AirPrint
+  from an iPhone both confirmed on paper. Reports from other cables and adapters are welcome.
 
 ## License
 
 This project is licensed under the [MIT License](LICENSE).
+
+The drivers listed under Credits are MIT-licensed themselves and were consulted as documentation only —
+to confirm behaviour against real hardware. No code was copied from them.
 
 ## Credits
 

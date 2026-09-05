@@ -1,6 +1,7 @@
 using System.Net;
 using System.Net.NetworkInformation;
 using System.Net.Sockets;
+using System.Text;
 using Microsoft.Extensions.Logging;
 
 namespace ImageWriterII.Ipp.Discovery;
@@ -40,7 +41,11 @@ public sealed class MdnsResponder : IDisposable
     private readonly ILogger _log;
     private readonly string _hostFqdn;
     private readonly List<(string typeFqdn, string instanceFqdn, MdnsService svc, List<string> subtypeFqdns)> _services = [];
-    private readonly Dictionary<int, InterfaceInfo> _interfaces = new();
+    // Published as an immutable snapshot: the receive loop, the announce timer and the network-change
+    // handler all read it, and a Dictionary being cleared and repopulated underneath them is not safe.
+    private volatile IReadOnlyDictionary<int, InterfaceInfo> _interfaces = new Dictionary<int, InterfaceInfo>();
+    /// <summary>Multicast group memberships currently joined, so a refresh can add and drop the difference.</summary>
+    private readonly HashSet<IPAddress> _joined = [];
     private readonly Dictionary<string, DateTime> _lastMulticast = new(StringComparer.OrdinalIgnoreCase);
     private readonly object _sendLock = new();
     private readonly Random _rng = new();
@@ -68,7 +73,21 @@ public sealed class MdnsResponder : IDisposable
     public IReadOnlyCollection<string> InstanceNames => _services.Select(s => s.instanceFqdn).ToList();
     public bool IsRunning => _loop is { IsCompleted: false };
 
-    private static string EscapeInstance(string name) => name.Replace(".", "\\.");
+    /// <summary>
+    /// Escapes dots (RFC 6763 4.3) and clamps the label to the 63 bytes DNS allows. Throwing instead would
+    /// take the whole responder down in <see cref="Start"/>, silently disabling discovery over a long name.
+    /// </summary>
+    private static string EscapeInstance(string name)
+    {
+        var bytes = Encoding.UTF8.GetBytes(name);
+        if (bytes.Length > 63)
+        {
+            int cut = 63;
+            while (cut > 0 && (bytes[cut] & 0xC0) == 0x80) cut--;   // do not split a UTF-8 sequence
+            name = Encoding.UTF8.GetString(bytes, 0, cut);
+        }
+        return name.Replace("\\", "\\\\").Replace(".", "\\.");
+    }
 
     public void Start()
     {
@@ -85,23 +104,11 @@ public sealed class MdnsResponder : IDisposable
         socket.SetSocketOption(SocketOptionLevel.IP, SocketOptionName.MulticastTimeToLive, 255);
         socket.SetSocketOption(SocketOptionLevel.IP, SocketOptionName.MulticastLoopback, true);
         socket.Bind(new IPEndPoint(IPAddress.Any, 5353));
-        foreach (var i in _interfaces.Values)
-        {
-            foreach (var addr in i.Addresses)
-            {
-                try
-                {
-                    socket.SetSocketOption(SocketOptionLevel.IP, SocketOptionName.AddMembership, new MulticastOption(Group, addr));
-                }
-                catch (SocketException ex)
-                {
-                    _log.LogWarning("mDNS: cannot join multicast group on {Interface} ({Address}): {Message}", i.Name, addr, ex.Message);
-                }
-            }
-        }
         _socket = socket;
+        SyncMemberships();
         _cts = new CancellationTokenSource();
         _loop = Task.Run(() => LoopAsync(_cts.Token));
+        NetworkChange.NetworkAddressChanged += OnNetworkChanged;
         _log.LogInformation("mDNS responder started: host {Host}, services {Services}, interfaces {Interfaces}",
             _hostFqdn, string.Join(", ", _services.Select(s => s.instanceFqdn)), string.Join(", ", _interfaces.Values.Select(i => $"{i.Name}={string.Join("/", i.Addresses)}")));
     }
@@ -109,6 +116,7 @@ public sealed class MdnsResponder : IDisposable
     public void Stop()
     {
         if (_socket is null) return;
+        NetworkChange.NetworkAddressChanged -= OnNetworkChanged;
         try { Announce(goodbye: true); } catch (Exception) { /* ignore */ }
         _cts?.Cancel();
         try { _socket.Close(); } catch (Exception) { /* ignore */ }
@@ -123,7 +131,7 @@ public sealed class MdnsResponder : IDisposable
 
     private void RefreshInterfaces()
     {
-        _interfaces.Clear();
+        var found = new Dictionary<int, InterfaceInfo>();
         foreach (var nic in NetworkInterface.GetAllNetworkInterfaces())
         {
             if (nic.OperationalStatus != OperationalStatus.Up) continue;
@@ -139,8 +147,71 @@ public sealed class MdnsResponder : IDisposable
             if (addrs.Count == 0) continue;
             int index;
             try { index = props.GetIPv4Properties().Index; } catch (Exception) { continue; }
-            _interfaces[index] = new InterfaceInfo(index, nic.Name, addrs);
+            found[index] = new InterfaceInfo(index, nic.Name, addrs);
         }
+        _interfaces = found;
+    }
+
+    /// <summary>
+    /// Joins the multicast group on every current interface address and drops departed ones. Without this a
+    /// responder that started before the network was up (a service beating DHCP to it), or that saw the NIC
+    /// change afterwards, stays joined to nothing and never receives another query - discovery simply stops.
+    /// </summary>
+    private void SyncMemberships()
+    {
+        var socket = _socket;
+        if (socket is null) return;
+        var current = _interfaces.Values.SelectMany(i => i.Addresses).ToHashSet();
+        int joinedCount;
+        lock (_joined)
+        {
+            foreach (var addr in current.Except(_joined).ToList())
+            {
+                try
+                {
+                    socket.SetSocketOption(SocketOptionLevel.IP, SocketOptionName.AddMembership, new MulticastOption(Group, addr));
+                    _joined.Add(addr);
+                    _log.LogInformation("mDNS: joined the multicast group on {Address}", addr);
+                }
+                catch (Exception ex)
+                {
+                    _log.LogWarning("mDNS: cannot join multicast group on {Address}: {Message}", addr, ex.Message);
+                }
+            }
+            foreach (var addr in _joined.Except(current).ToList())
+            {
+                try { socket.SetSocketOption(SocketOptionLevel.IP, SocketOptionName.DropMembership, new MulticastOption(Group, addr)); }
+                catch (Exception) { /* the address is already gone; the membership goes with the socket */ }
+                _joined.Remove(addr);
+                _log.LogInformation("mDNS: left the multicast group on {Address}", addr);
+            }
+            joinedCount = _joined.Count;
+        }
+        if (joinedCount == 0)
+            _log.LogWarning("mDNS: not joined on any interface; discovery is inactive until a network appears");
+    }
+
+    /// <summary>An address changed: re-enumerate, re-join and re-announce after letting the stack settle.</summary>
+    private void OnNetworkChanged(object? sender, EventArgs e)
+    {
+        var ct = _cts?.Token ?? CancellationToken.None;
+        _ = Task.Run(async () =>
+        {
+            try
+            {
+                await Task.Delay(TimeSpan.FromSeconds(2), ct);   // debounce a burst of change events
+                RefreshInterfaces();
+                SyncMemberships();
+                // RFC 6762 8.3: announce again once the address set has changed.
+                for (int i = 0; i < 2 && !ct.IsCancellationRequested; i++)
+                {
+                    Announce();
+                    await Task.Delay(TimeSpan.FromSeconds(1), ct);
+                }
+            }
+            catch (OperationCanceledException) { }
+            catch (Exception ex) { _log.LogDebug(ex, "mDNS network-change handling failed"); }
+        }, ct);
     }
 
     private static bool IsLinkLocal(IPAddress a)
@@ -196,7 +267,7 @@ public sealed class MdnsResponder : IDisposable
             while (!ct.IsCancellationRequested)
             {
                 await Task.Delay(TimeSpan.FromMinutes(30), ct);
-                try { RefreshInterfaces(); Announce(); } catch (Exception ex) { _log.LogDebug(ex, "mDNS re-announce failed"); }
+                try { RefreshInterfaces(); SyncMemberships(); Announce(); } catch (Exception ex) { _log.LogDebug(ex, "mDNS re-announce failed"); }
             }
         }, ct);
 
@@ -233,13 +304,16 @@ public sealed class MdnsResponder : IDisposable
         var packet = DnsWire.Parse(data);
         if (!packet.IsQuery || packet.Questions.Count == 0) return;
 
-        if (!_interfaces.TryGetValue(interfaceIndex, out var iface))
+        var interfaces = _interfaces;
+        if (!interfaces.TryGetValue(interfaceIndex, out var iface))
         {
             RefreshInterfaces();
-            if (!_interfaces.TryGetValue(interfaceIndex, out iface))
+            SyncMemberships();
+            interfaces = _interfaces;
+            if (!interfaces.TryGetValue(interfaceIndex, out iface))
             {
                 // Unknown interface (e.g. loopback delivery): answer with every address we have.
-                iface = new InterfaceInfo(interfaceIndex, "any", _interfaces.Values.SelectMany(i => i.Addresses).Distinct().ToList());
+                iface = new InterfaceInfo(interfaceIndex, "any", interfaces.Values.SelectMany(i => i.Addresses).Distinct().ToList());
                 if (iface.Addresses.Count == 0) return;
             }
         }

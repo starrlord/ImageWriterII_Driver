@@ -46,6 +46,31 @@ public sealed class RasterPageHeader
     /// <summary>Bytes per "pixel unit" for the run-length coder: max(1, BitsPerPixel/8).</summary>
     public int BytesPerPixel => Math.Max(1, BitsPerPixel / 8);
 
+    /// <summary>Widest sensible page: 17" at the printer's highest density, with plenty of headroom.</summary>
+    private const int MaxDimension = 40_000;
+    /// <summary>Hard cap on one decoded page. A letter page of 32-bit CMYK at 160 dpi is about 12 MB.</summary>
+    private const long MaxPageBytes = 256L * 1024 * 1024;
+
+    /// <summary>
+    /// Sanity-checks the geometry before anything allocates a page buffer from it. The raw fields are
+    /// attacker-controlled: the raw port on 9100 is unauthenticated, so ~1.8 KB of header must not be able
+    /// to ask for a gigabyte. Throws <see cref="InvalidDataException"/> so the job aborts as a bad document
+    /// rather than as an OutOfMemoryException.
+    /// </summary>
+    public RasterPageHeader Validated()
+    {
+        if (Width is < 1 or > MaxDimension || Height is < 1 or > MaxDimension)
+            throw new InvalidDataException($"Raster page geometry out of range: {Width}x{Height} px.");
+        if (BitsPerPixel is not (1 or 8 or 16 or 24 or 32))
+            throw new InvalidDataException($"Unsupported raster depth: {BitsPerPixel} bits per pixel.");
+        long minStride = ((long)Width * BitsPerPixel + 7) / 8;
+        if (BytesPerLine < minStride)
+            throw new InvalidDataException($"Raster stride {BytesPerLine} is too small for {Width} px at {BitsPerPixel} bpp (needs {minStride}).");
+        if ((long)BytesPerLine * Height > MaxPageBytes)
+            throw new InvalidDataException($"Raster page would need {(long)BytesPerLine * Height / (1024 * 1024)} MB, over the {MaxPageBytes / (1024 * 1024)} MB limit.");
+        return this;
+    }
+
     public override string ToString() =>
         $"{Width}x{Height} px, {HwResolutionX}x{HwResolutionY} dpi, {ColorSpace}/{BitsPerPixel} bpp, media {MediaSizeName} {PageWidthPoints}x{PageHeightPoints} pt, copies {NumCopies}, quality {PrintQuality}";
 }
@@ -64,6 +89,8 @@ public sealed class RasterStreamReader
     private bool _apple;
     private bool _compressedStream = true;
     private int _applePagesRemaining;
+    /// <summary>Bytes consumed from the document so far; only used to make decode errors diagnosable.</summary>
+    public long BytesConsumed { get; private set; }
 
     public RasterStreamReader(Stream stream) => _stream = stream;
 
@@ -98,7 +125,7 @@ public sealed class RasterStreamReader
     public void ReadPagePixels(RasterPageHeader h, Span<byte> dest)
     {
         int lineBytes = h.BytesPerLine;
-        if (dest.Length < lineBytes * h.Height) throw new ArgumentException("Destination too small.", nameof(dest));
+        if (dest.Length < (long)lineBytes * h.Height) throw new ArgumentException("Destination too small.", nameof(dest));
 
         if (!h.Compressed)
         {
@@ -117,26 +144,29 @@ public sealed class RasterStreamReader
             while (pos < lineBytes)
             {
                 int code = ReadByteOrThrow();
-                if (code > 128)
+                if (code == 0x80 && _apple)
                 {
-                    // literal run of (257 - code) pixels
+                    // Apple Raster only: 0x80 (-128 as a signed count) means "fill the rest of the line with
+                    // white and end the line", and NO pixel follows it. PWG raster gives the same byte the
+                    // opposite meaning - a 129-pixel literal run - so this must stay keyed on the format.
+                    // Reading it the PWG way consumes 129 bytes that were never sent and desynchronises the
+                    // whole rest of the document, which is what made every iOS/macOS AirPrint job fail.
+                    line[pos..].Fill(0xFF);
+                    pos = lineBytes;
+                }
+                else if (code >= 128)
+                {
+                    // Literal run of (257 - code) pixels; for PWG, code 128 means 129 literals.
                     int count = (257 - code) * bpp;
                     if (count > lineBytes - pos) count = lineBytes - pos;
-                    if (!TryReadExactly(line.Slice(pos, count))) throw new EndOfStreamException("Truncated raster data.");
+                    if (!TryReadExactly(line.Slice(pos, count))) throw Truncated(h, y, pos, code);
                     pos += count;
                 }
                 else
                 {
-                    // repeat next pixel (code + 1) times; code 128 is a 129-literal in CUPS, keep that behaviour
-                    int count = code == 128 ? 129 : code + 1;
-                    if (code == 128)
-                    {
-                        int bytes = Math.Min(count * bpp, lineBytes - pos);
-                        if (!TryReadExactly(line.Slice(pos, bytes))) throw new EndOfStreamException("Truncated raster data.");
-                        pos += bytes;
-                        continue;
-                    }
-                    if (!TryReadExactly(pixel)) throw new EndOfStreamException("Truncated raster data.");
+                    // Repeat the next single pixel (code + 1) times.
+                    int count = code + 1;
+                    if (!TryReadExactly(pixel)) throw Truncated(h, y, pos, code);
                     for (int i = 0; i < count && pos < lineBytes; i++)
                     {
                         for (int b = 0; b < bpp && pos < lineBytes; b++) line[pos++] = pixel[b];
@@ -148,6 +178,10 @@ public sealed class RasterStreamReader
                 line.CopyTo(dest.Slice(y * lineBytes, lineBytes));
         }
     }
+
+    private EndOfStreamException Truncated(RasterPageHeader h, int y, int pos, int code) =>
+        new($"Truncated raster data at row {y}/{h.Height}, byte {pos}/{h.BytesPerLine} of the row, " +
+            $"after {BytesConsumed} bytes (last count byte 0x{code:X2}, {(_apple ? "Apple URF" : "PWG")} {h.BitsPerPixel} bpp).");
 
     private bool ReadSync()
     {
@@ -218,7 +252,7 @@ public sealed class RasterStreamReader
             MediaSizeName = Str(b, 1732, 64),
             MediaType = Str(b, 128, 64),
             Compressed = _compressedStream
-        };
+        }.Validated();
     }
 
     private RasterPageHeader ParseAppleHeader(ReadOnlySpan<byte> b)
@@ -256,13 +290,14 @@ public sealed class RasterStreamReader
             TotalPageCount = _applePagesRemaining + 1,
             PrintQuality = b[3],
             Compressed = true
-        };
+        }.Validated();
     }
 
     private int ReadByteOrThrow()
     {
         int b = _stream.ReadByte();
-        if (b < 0) throw new EndOfStreamException("Truncated raster data.");
+        if (b < 0) throw new EndOfStreamException($"Truncated raster data: stream ended after {BytesConsumed} bytes.");
+        BytesConsumed++;
         return b;
     }
 
@@ -272,9 +307,10 @@ public sealed class RasterStreamReader
         while (total < buffer.Length)
         {
             int n = _stream.Read(buffer[total..]);
-            if (n <= 0) return false;
+            if (n <= 0) { BytesConsumed += total; return false; }
             total += n;
         }
+        BytesConsumed += total;
         return true;
     }
 }

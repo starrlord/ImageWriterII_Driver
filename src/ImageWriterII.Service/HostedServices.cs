@@ -113,7 +113,6 @@ public sealed class MdnsAdvertiser : IHostedService
                 new("kind", "document"),
                 new("priority", "0"),
                 new("PaperMax", "legal-A4"),
-                new("mopria-certified", "1.3"),
                 new("usb_MFG", "Apple"),
                 new("usb_MDL", "ImageWriter II"),
                 new("usb_CMD", "PWGRaster,URF")

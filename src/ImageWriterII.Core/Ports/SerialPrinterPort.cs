@@ -60,7 +60,7 @@ public sealed class SerialPrinterPort : IPrinterPort
     private long _pacedBytes;
     private ReadyLine _readyLine = ReadyLine.Unknown;
     private bool _softwareGated;      // gate + pace writes on _readyLine in software
-    private bool _hardwareApplied;    // adapter does the flow control itself
+    private bool _hardwareApplied;    // adapter does the flow control itself (diagnostics only)
     private string _modeDescription = "";
 
     public SerialPrinterPort(SerialPortSettings settings) => _s = settings;
@@ -233,38 +233,57 @@ public sealed class SerialPrinterPort : IPrinterPort
         _port = null;
     }
 
+    public CancellationToken WriteCancellation { get; set; }
+
+    public bool HardwareFlowControl => _hardwareApplied;
+
     public void Write(ReadOnlySpan<byte> data)
     {
         var p = _port ?? throw new InvalidOperationException("Port not open.");
+        var ct = WriteCancellation;
         int pace = _s.MaxBytesPerSecond;
         if (_softwareGated && pace <= 0) pace = 480; // half the line rate: the 2K buffer never fills, so the gate only matters when the printer is off-line
-        if (!_softwareGated && _readyLine != ReadyLine.Unknown && pace <= 0)
-        {
-            p.BaseStream.Write(data);
-            return;
-        }
+
+        // Always write in small chunks and check the ready line before each one, even when the adapter does
+        // the flow control itself. A single large BaseStream.Write to an off-line printer blocks in WriteFile
+        // with an infinite timeout and cannot be cancelled; a chunk that starts with the line high completes.
+        int chunk = _softwareGated ? 16 : 64;
         int pos = 0;
         while (pos < data.Length)
         {
-            if (_softwareGated || _readyLine == ReadyLine.Unknown)
-            {
-                // Wait for the ready line; while waiting keep the in-flight amount small.
-                while (!IsReady)
-                {
-                    if (!p.IsOpen) throw new IOException("Serial port closed while waiting for the printer.");
-                    Thread.Sleep(20);
-                }
-            }
-            int n = Math.Min(_softwareGated ? 16 : 64, data.Length - pos);
+            WaitUntilReady(p, ct);
+            int n = Math.Min(chunk, data.Length - pos);
             p.BaseStream.Write(data.Slice(pos, n));
             pos += n;
             if (pace > 0)
             {
                 _pacedBytes += n;
                 double ahead = (double)_pacedBytes / pace - _pace.Elapsed.TotalSeconds;
-                if (ahead > 0.005) Thread.Sleep(TimeSpan.FromSeconds(ahead));
+                if (ahead > 0.005) Sleep(TimeSpan.FromSeconds(ahead), ct);
+                // Idle time must not bank burst credit: after a long pause the deficit would let a whole
+                // job go out at line rate with no pacing at all, which is exactly what pacing is there to stop.
+                else if (ahead < -1.0) { _pace.Restart(); _pacedBytes = 0; }
             }
         }
+    }
+
+    /// <summary>Blocks until the printer's ready line is high, honouring <see cref="WriteCancellation"/>.</summary>
+    private void WaitUntilReady(SerialPort p, CancellationToken ct)
+    {
+        if (IsReady) return;
+        while (true)
+        {
+            ct.ThrowIfCancellationRequested();
+            if (!p.IsOpen) throw new IOException("Serial port closed while waiting for the printer.");
+            if (IsReady) return;
+            Sleep(TimeSpan.FromMilliseconds(20), ct);
+        }
+    }
+
+    private static void Sleep(TimeSpan delay, CancellationToken ct)
+    {
+        if (ct.CanBeCanceled) ct.WaitHandle.WaitOne(delay);
+        else Thread.Sleep(delay);
     }
 
     public void Flush()
@@ -332,6 +351,8 @@ public sealed class FilePrinterPort : IPrinterPort
     public int BytesToWrite => 0;
     public bool IsReady => true;
     public string LineStatus => "file";
+    public bool HardwareFlowControl => false;
+    public CancellationToken WriteCancellation { get; set; }
 
     public void Open()
     {
@@ -367,6 +388,8 @@ public sealed class StreamPrinterPort : IPrinterPort
     public int BytesToWrite => 0;
     public bool IsReady => true;
     public string LineStatus => "stream";
+    public bool HardwareFlowControl => false;
+    public CancellationToken WriteCancellation { get; set; }
     public void Open() => IsOpen = true;
     public void Close() { IsOpen = false; if (!_leaveOpen) _stream.Dispose(); }
     public void Write(ReadOnlySpan<byte> data) => _stream.Write(data);

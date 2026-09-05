@@ -165,13 +165,42 @@ public sealed class IppPrinter
         return set;
     }
 
+    /// <summary>
+    /// The Job Template attributes this printer emits (RFC 8011 section 5.2 and PWG 5100.x). Everything else
+    /// BuildPrinterAttributes produces is Printer Description. A suffix rule cannot tell the two apart:
+    /// "-supported" also ends operations-supported, ipp-versions-supported, document-format-supported,
+    /// charset-supported, urf-supported and a dozen more that are Printer Description, and "-default" also
+    /// ends document-format-default. Getting it wrong drops required attributes from a client that asks for
+    /// the group by name (ipptool, the IPP Everywhere self-certification suite) rather than for "all".
+    /// </summary>
+    private static readonly HashSet<string> JobTemplateAttributes = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "copies-default", "copies-supported",
+        "finishings-default", "finishings-supported",
+        "job-priority-default", "job-priority-supported",
+        "job-sheets-default", "job-sheets-supported",
+        "media-default", "media-supported", "media-ready", "media-size-supported",
+        "media-col-default", "media-col-supported", "media-col-ready", "media-col-database",
+        "media-bottom-margin-supported", "media-left-margin-supported", "media-right-margin-supported",
+        "media-top-margin-supported", "media-source-supported", "media-type-supported",
+        "multiple-document-handling-default", "multiple-document-handling-supported",
+        "orientation-requested-default", "orientation-requested-supported",
+        "output-bin-default", "output-bin-supported",
+        "print-color-mode-default", "print-color-mode-supported",
+        "print-content-optimize-default", "print-content-optimize-supported",
+        "print-quality-default", "print-quality-supported",
+        "print-scaling-default", "print-scaling-supported",
+        "printer-resolution-default", "printer-resolution-supported",
+        "sides-default", "sides-supported",
+    };
+
     private static bool WantAttribute(HashSet<string>? requested, string name)
     {
         // PWG 5100.7: media-col-database only when explicitly requested (it is large).
         if (name == "media-col-database") return requested is not null && requested.Contains(name);
         if (requested is null || requested.Contains("all")) return true;
         if (requested.Contains(name)) return true;
-        bool isJobTemplate = name.EndsWith("-default", StringComparison.Ordinal) || name.EndsWith("-supported", StringComparison.Ordinal) || name.StartsWith("media-col", StringComparison.Ordinal) || name == "media-ready";
+        bool isJobTemplate = JobTemplateAttributes.Contains(name);
         if (requested.Contains("job-template") && isJobTemplate) return true;
         if (requested.Contains("printer-description") && !isJobTemplate) return true;
         return false;
@@ -290,7 +319,6 @@ public sealed class IppPrinter
         Add("printer-state-change-time", IppValue.Integer(_status.SecondsSinceStart(_status.StateChangedAt)));
         Add("printer-state-message", IppValue.Text(_status.Message));
         AddKeywords("printer-state-reasons", _status.Reasons);
-        Add("printer-strings-languages-supported", IppValue.Language("en"));
         if (color)
         {
             list.Add(new IppAttribute("printer-supply",
@@ -319,7 +347,6 @@ public sealed class IppPrinter
         Add("uri-security-supported", IppValue.Keyword("none"));
         AddKeywords("urf-supported", UrfSupported(resolutions, color));
         AddKeywords("which-jobs-supported", ["completed", "not-completed", "all"]);
-        Add("mopria-certified", IppValue.Text("1.3"));
         return list;
     }
 

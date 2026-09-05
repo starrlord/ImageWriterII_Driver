@@ -16,8 +16,15 @@ public interface IPrinterPort : IDisposable
     int BytesToWrite { get; }
     /// <summary>True when the printer signals it can accept data (always true for transports without a ready line).</summary>
     bool IsReady { get; }
+    /// <summary>
+    /// Aborts a write that is parked waiting for the printer's ready line. The spooler sets this for the
+    /// duration of a job so Cancel-Job and service shutdown are not stuck behind an off-line printer.
+    /// </summary>
+    CancellationToken WriteCancellation { get; set; }
     /// <summary>Modem control line states for diagnostics, e.g. "CTS=low DSR=high DCD=high".</summary>
     string LineStatus { get; }
+    /// <summary>True when the transport itself throttles the sender (adapter hardware handshake or XON/XOFF).</summary>
+    bool HardwareFlowControl { get; }
 }
 
 /// <summary>Adapts an <see cref="IPrinterPort"/> to a write-only <see cref="Stream"/>.</summary>
@@ -30,6 +37,15 @@ public sealed class PrinterPortStream : Stream
     {
         _port = port;
         _ct = cancellationToken;
+        // Let the port itself break out of a ready-line wait; without this a write that is parked because
+        // the printer is off-line ignores cancellation until the printer comes back.
+        port.WriteCancellation = cancellationToken;
+    }
+
+    protected override void Dispose(bool disposing)
+    {
+        if (disposing) _port.WriteCancellation = CancellationToken.None;
+        base.Dispose(disposing);
     }
 
     public long TotalBytes { get; private set; }
