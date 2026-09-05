@@ -8,7 +8,11 @@ namespace ImageWriterII.Ipp.Server;
 
 public enum RibbonSetting
 {
-    /// <summary>Ask the printer with ESC ? at startup; fall back to Black when it does not answer.</summary>
+    /// <summary>
+    /// Ask the printer with ESC ? at startup; fall back to Black when it does not answer.
+    /// The query needs the printer-to-PC data line (Mini-DIN-8 pin 5), which many cables omit,
+    /// so this is not the default: see <see cref="PrinterConfig.Ribbon"/>.
+    /// </summary>
     Auto,
     Black,
     Color
@@ -32,7 +36,12 @@ public sealed class PrinterConfig
     public int RawPort { get; set; } = 9100;
 
     public SerialPortSettings Serial { get; set; } = new();
-    public RibbonSetting Ribbon { get; set; } = RibbonSetting.Auto;
+    /// <summary>
+    /// Which ribbon is fitted. Colour is the default: the four-colour ribbon is what makes this printer
+    /// interesting, a colour job on a black ribbon still prints (just in black), and <see cref="RibbonSetting.Auto"/>
+    /// silently degrades to black on the many cables that have no printer-to-PC data line.
+    /// </summary>
+    public RibbonSetting Ribbon { get; set; } = RibbonSetting.Color;
 
     public Iw2EncoderOptions Encoder { get; set; } = new();
     public HalftoneOptions Halftone { get; set; } = new();
