@@ -25,6 +25,56 @@ Everything is derived from the *Apple ImageWriter II Technical Reference Manual*
 `docs/printer-protocol.md`), and every escape stream the encoder produces is checked dot-for-dot
 by a built-in printer simulator in the unit tests.
 
+## Printer Status
+<img src="assets/printer_status.png" width="460" alt="Printer Status">
+
+
+
+## Hardware I Used for Printer to PC
+
+The following hardware was used to connect the printer's **Mini-DIN 8 serial interface** to a modern PC via USB.
+
+## Required Hardware
+
+1. **KENTEK Mini-DIN 8 to DB25 Printer Cable — 6 ft**
+
+   * Mini-DIN 8 → DB25
+   * Male → Male
+   * 28 AWG
+   * Designed for ImageWriter I / RS-232 serial connections
+   * [View on Amazon](https://www.amazon.com/dp/B07WK2LZDD)
+
+2. **CableWholesale DB9 Female to DB25 Female Serial Adapter**
+
+   * DB9 Female → DB25 Female
+   * Provides the necessary connection between the printer cable and USB serial adapter
+   * [View on Amazon](https://www.amazon.com/dp/B000I96390)
+
+3. **DTECH USB to Serial Adapter — 6 ft**
+
+   * USB → DB9 RS-232 Male
+   * **FTDI FT232RL chipset**
+   * Supports Windows 11/10/8/7, macOS, and Linux
+   * [View on Amazon](https://www.amazon.com/dp/B08T92M9KP)
+
+### Connection Chain
+
+`Printer → Mini-DIN 8 → DB25 → DB9 → USB → PC`
+
+### Complete Setup
+
+**Printer**
+↓
+**KENTEK Mini-DIN 8 → DB25 Cable**
+↓
+**CableWholesale DB25 → DB9 Adapter**
+↓
+**DTECH FTDI USB → Serial Adapter**
+↓
+**PC**
+
+
+
 ## Contents
 
 ```
