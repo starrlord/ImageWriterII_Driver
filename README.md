@@ -234,8 +234,9 @@ Private and you would rather it stayed that way.
 * **Plain IPP only.** The service offers `_ipp._tcp` over HTTP on port 631; it does not offer `_ipps._tcp`
   or TLS. Current iOS and macOS still print happily to plain-IPP printers, but the traffic is unencrypted
   and unauthenticated — fine on a home LAN, not something to expose to the internet.
-* **IPv4 only.** The responder answers with A records; there are no AAAA records, so an IPv6-only network
-  will not find it.
+* **Discovery is IPv4 only, and that is not planned to change.** The responder emits A records and no AAAA
+  ones, so the printer cannot be *found* over IPv6. The listeners themselves are dual-stack, so printing over
+  IPv6 works if the client is given the address directly; only an IPv6-only network is stuck.
 * **No PDF.** The service accepts PWG raster, Apple raster, plain text and native ImageWriter data.
   AirPrint from iOS and macOS always sends raster, so this is not a problem in practice — but a third-party
   app or an Android client that can only emit PDF will not work.
@@ -348,8 +349,8 @@ assets/                    screenshots used by this README
 * Only raster input: PWG raster and Apple raster (plus plain text and native ImageWriter data). No PDF or PCLm,
   so clients that can only send PDF (some Android apps) will not work; Windows, macOS, iOS and CUPS all send raster.
 * IPP over plain HTTP only (`_ipp._tcp`); no TLS / `_ipps._tcp`. Fine on a home LAN, not for the open internet.
-* The DNS-SD responder is IPv4 only, and discovery *from the same PC* depends on Windows's own mDNS resolver;
-  adding the queue by URL always works.
+* The DNS-SD responder is IPv4 only (deliberately — the listeners are dual-stack, only discovery is not), and
+  discovery *from the same PC* depends on Windows's own mDNS resolver; adding the queue by URL always works.
 * One document per job; copies are handled by re-sending pages.
 * DSR-based hardware handshake uses the Windows serial API; on other platforms `Auto` falls back to software gating.
 * Verified on one ImageWriter II over the cable chain above: colour printing from Windows and colour AirPrint

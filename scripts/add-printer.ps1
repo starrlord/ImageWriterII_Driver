@@ -17,7 +17,11 @@
   Printer queue name in Windows.
 
 .PARAMETER Url
-  IPP endpoint of the service. Defaults to the local machine.
+  IPP endpoint of the service. Defaults to the local machine, on whatever HttpPort the installed
+  appsettings.json specifies.
+
+.PARAMETER InstallDir
+  Where the service is installed; only used to read HttpPort for the default -Url.
 
 .PARAMETER Color
   Force the queue's default colour mode: Auto (default, follow the service), Yes or No.
@@ -25,12 +29,30 @@
 [CmdletBinding()]
 param(
     [string]$Name = "ImageWriter II",
-    [string]$Url = "http://localhost:631/ipp/print",
+    [string]$Url,
     [ValidateSet("Auto", "Yes", "No")]
-    [string]$Color = "Auto"
+    [string]$Color = "Auto",
+    [string]$InstallDir = "$env:ProgramFiles\ImageWriterII"
 )
 
 $ErrorActionPreference = "Stop"
+
+# Default the endpoint from the installed configuration rather than assuming 631, so a changed HttpPort
+# still works without the caller having to spell out -Url.
+if (-not $Url) {
+    $httpPort = 631
+    $configPath = Join-Path $InstallDir "appsettings.json"
+    if (Test-Path $configPath) {
+        try {
+            $json = (Get-Content $configPath -Raw) -replace '(?m)^\s*//.*$', ''   # the config allows // comments
+            $port = ($json | ConvertFrom-Json).ImageWriter.HttpPort
+            if ($null -ne $port) { $httpPort = [int]$port }
+        } catch {
+            Write-Warning "Could not read HttpPort from $configPath; assuming $httpPort."
+        }
+    }
+    $Url = "http://localhost:$httpPort/ipp/print"
+}
 
 # The service must be reachable first.
 $statusUrl = $Url -replace '/ipp/print$', '/api/status'

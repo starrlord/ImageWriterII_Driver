@@ -513,6 +513,11 @@ public sealed class IppPrinter
     private IppStatus SendDocument(IppMessage request, IppMessage response, IppRequestContext ctx)
     {
         var job = FindJob(request);
+        // A job that has already been cancelled or aborted must not come back to life: Enqueue resets the
+        // state to Pending, so without this a Send-Document racing a Cancel-Job would print after all.
+        if (job.IsFinished)
+            throw new IppException(IppStatus.ClientErrorNotPossible, $"Job {job.Id} is already {job.State}");
+
         bool last = request.GetBool(IppTag.OperationAttributes, "last-document") ?? true;
         var format = request.GetString(IppTag.OperationAttributes, "document-format");
         if (format is not null)

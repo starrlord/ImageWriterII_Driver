@@ -258,24 +258,28 @@ public sealed class SerialPrinterPort : IPrinterPort
             if (pace > 0)
             {
                 _pacedBytes += n;
-                double ahead = (double)_pacedBytes / pace - _pace.Elapsed.TotalSeconds;
-                if (ahead > 0.005) Sleep(TimeSpan.FromSeconds(ahead), ct);
-                // Idle time must not bank burst credit: after a long pause the deficit would let a whole
-                // job go out at line rate with no pacing at all, which is exactly what pacing is there to stop.
-                else if (ahead < -1.0) { _pace.Restart(); _pacedBytes = 0; }
+                var decision = Pacing.Next(_pacedBytes, pace, _pace.Elapsed);
+                if (decision.Delay > TimeSpan.Zero) Sleep(decision.Delay, ct);
+                if (decision.Reset) { _pace.Restart(); _pacedBytes = 0; }
             }
         }
     }
 
     /// <summary>Blocks until the printer's ready line is high, honouring <see cref="WriteCancellation"/>.</summary>
-    private void WaitUntilReady(SerialPort p, CancellationToken ct)
+    private void WaitUntilReady(SerialPort p, CancellationToken ct) => WaitUntilReady(() => IsReady, () => p.IsOpen, ct);
+
+    /// <summary>
+    /// The ready-line gate, separated from <see cref="SerialPort"/> so it can be tested. Blocks until
+    /// <paramref name="isReady"/> goes true, throwing if the token is cancelled or the port closes underneath.
+    /// </summary>
+    internal static void WaitUntilReady(Func<bool> isReady, Func<bool> isOpen, CancellationToken ct)
     {
-        if (IsReady) return;
+        if (isReady()) return;
         while (true)
         {
             ct.ThrowIfCancellationRequested();
-            if (!p.IsOpen) throw new IOException("Serial port closed while waiting for the printer.");
-            if (IsReady) return;
+            if (!isOpen()) throw new IOException("Serial port closed while waiting for the printer.");
+            if (isReady()) return;
             Sleep(TimeSpan.FromMilliseconds(20), ct);
         }
     }
@@ -284,6 +288,30 @@ public sealed class SerialPrinterPort : IPrinterPort
     {
         if (ct.CanBeCanceled) ct.WaitHandle.WaitOne(delay);
         else Thread.Sleep(delay);
+    }
+
+    /// <summary>
+    /// Output pacing for adapters that mishandle flow control, kept as pure arithmetic so it is testable.
+    /// The sender is "ahead" when it has pushed more bytes than the byte-rate allows for the time elapsed,
+    /// and sleeps off the difference.
+    /// </summary>
+    internal static class Pacing
+    {
+        /// <summary>Idle longer than this and the accumulated deficit is discarded rather than banked.</summary>
+        internal const double MaxCreditSeconds = 1.0;
+
+        internal readonly record struct Decision(TimeSpan Delay, bool Reset);
+
+        internal static Decision Next(long pacedBytes, int bytesPerSecond, TimeSpan elapsed)
+        {
+            if (bytesPerSecond <= 0) return new Decision(TimeSpan.Zero, false);
+            double ahead = (double)pacedBytes / bytesPerSecond - elapsed.TotalSeconds;
+            if (ahead > 0.005) return new Decision(TimeSpan.FromSeconds(ahead), false);
+            // Idle time must not bank burst credit: after a long pause the deficit would let a whole job go
+            // out at line rate with no pacing at all, which is exactly what pacing exists to prevent.
+            if (ahead < -MaxCreditSeconds) return new Decision(TimeSpan.Zero, true);
+            return new Decision(TimeSpan.Zero, false);
+        }
     }
 
     public void Flush()

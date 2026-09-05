@@ -208,6 +208,10 @@ public sealed class PrintSpooler : BackgroundService
         }
     }
 
+    /// <summary>How many undecodable documents to keep before the oldest is discarded.</summary>
+    private const int KeepFailedDocuments = 5;
+    private const string FailedDocumentPrefix = "failed-job";
+
     private void KeepFailedDocument(PrintJob job)
     {
         try
@@ -219,7 +223,7 @@ public sealed class PrintSpooler : BackgroundService
                 JobDocumentKind.Text => "txt",
                 _ => "bin"
             };
-            string kept = Path.Combine(_cfg.SpoolDirectory, $"failed-job{job.Id}.{ext}");
+            string kept = Path.Combine(_cfg.SpoolDirectory, $"{FailedDocumentPrefix}{job.Id}.{ext}");
             using (var src = File.OpenRead(job.SpoolPath!))
             using (var dst = File.Create(kept))
             {
@@ -227,10 +231,36 @@ public sealed class PrintSpooler : BackgroundService
                 src.CopyTo(dst);
             }
             _log.LogWarning("Kept the undecodable document of job {Id} at {Path} ({Bytes} bytes) for diagnosis", job.Id, kept, job.DocumentBytes);
+            PruneFailedDocuments();
         }
         catch (Exception ex)
         {
             _log.LogDebug(ex, "Could not keep the failed document of job {Id}", job.Id);
+        }
+    }
+
+    /// <summary>
+    /// Keeps only the most recent <see cref="KeepFailedDocuments"/> retained documents. A client that loops
+    /// on a document we cannot decode would otherwise fill the spool directory until the next service start.
+    /// </summary>
+    private void PruneFailedDocuments()
+    {
+        try
+        {
+            var kept = new DirectoryInfo(_cfg.SpoolDirectory)
+                .GetFiles(FailedDocumentPrefix + "*")
+                .OrderByDescending(f => f.LastWriteTimeUtc)
+                .Skip(KeepFailedDocuments)
+                .ToList();
+            foreach (var f in kept)
+            {
+                try { f.Delete(); } catch (Exception) { /* ignore */ }
+            }
+            if (kept.Count > 0) _log.LogDebug("Pruned {Count} old retained document(s) from the spool directory", kept.Count);
+        }
+        catch (Exception ex)
+        {
+            _log.LogDebug(ex, "Could not prune retained documents");
         }
     }
 

@@ -24,8 +24,19 @@ if ($svc) {
     Write-Host "Service not installed."
 }
 
-foreach ($name in "ImageWriterII IPP (TCP 631)", "ImageWriterII mDNS (UDP 5353)", "ImageWriterII raw print (TCP 9100)") {
+# Current rule names carry no port, so they survive a changed HttpPort/RawPort; the parenthesised ones are
+# what older installs created. Remove both, and anything else this project left behind.
+$ruleNames = @(
+    "ImageWriterII IPP", "ImageWriterII mDNS", "ImageWriterII raw print",
+    "ImageWriterII IPP (TCP 631)", "ImageWriterII mDNS (UDP 5353)", "ImageWriterII raw print (TCP 9100)"
+)
+foreach ($name in $ruleNames) {
     Get-NetFirewallRule -DisplayName $name -ErrorAction SilentlyContinue | Remove-NetFirewallRule
+}
+$stray = Get-NetFirewallRule -ErrorAction SilentlyContinue | Where-Object { $_.DisplayName -like "ImageWriterII*" }
+if ($stray) {
+    Write-Host "Removing $($stray.Count) further ImageWriterII firewall rule(s): $($stray.DisplayName -join ', ')"
+    $stray | Remove-NetFirewallRule
 }
 
 if ($RemoveFiles -and (Test-Path $InstallDir)) {

@@ -110,23 +110,52 @@ if (-not $existing) {
 # restart on failure
 sc.exe failure $serviceName reset= 86400 actions= restart/5000/restart/10000/restart/30000 | Out-Null
 
-# Firewall. Windows classifies most home Ethernet/Wi-Fi networks as Public, and AirPrint from a phone comes
-# from the LAN, so the default covers every profile. The rules stay narrow: this program, these three ports,
-# inbound only. Pass -FirewallProfile Private,Domain to restrict them.
-Write-Host "Configuring firewall rules ($FirewallProfile)" -ForegroundColor Cyan
-foreach ($rule in @(
-    @{ Name = "ImageWriterII IPP (TCP 631)"; Protocol = "TCP"; Port = 631 },
-    @{ Name = "ImageWriterII mDNS (UDP 5353)"; Protocol = "UDP"; Port = 5353 },
-    @{ Name = "ImageWriterII raw print (TCP 9100)"; Protocol = "TCP"; Port = 9100 })) {
+# Read the ports the service will actually listen on, so the firewall rules and the health check follow the
+# configuration instead of assuming the defaults. The config allows // comments, which ConvertFrom-Json
+# rejects on Windows PowerShell, so strip them first.
+$httpPort = 631
+$rawPort = 9100
+$rawEnabled = $true
+try {
+    $json = (Get-Content $configPath -Raw) -replace '(?m)^\s*//.*$', ''
+    $cfg = ($json | ConvertFrom-Json).ImageWriter
+    if ($null -ne $cfg.HttpPort) { $httpPort = [int]$cfg.HttpPort }
+    if ($null -ne $cfg.RawPort) { $rawPort = [int]$cfg.RawPort }
+    if ($null -ne $cfg.RawPortEnabled) { $rawEnabled = [bool]$cfg.RawPortEnabled }
+} catch {
+    Write-Warning "Could not parse $configPath ($($_.Exception.Message)); assuming ports $httpPort / 5353 / $rawPort."
+}
+
+# Windows classifies most home Ethernet/Wi-Fi networks as Public, and AirPrint from a phone comes from the
+# LAN, so the default covers every profile. The rules stay narrow: this program, these ports, inbound only.
+# Pass -FirewallProfile Private,Domain to restrict them.
+Write-Host "Configuring firewall rules ($FirewallProfile) for TCP $httpPort / UDP 5353$(if ($rawEnabled) { " / TCP $rawPort" })" -ForegroundColor Cyan
+$rules = @(
+    @{ Name = "ImageWriterII IPP"; Protocol = "TCP"; Port = $httpPort },
+    @{ Name = "ImageWriterII mDNS"; Protocol = "UDP"; Port = 5353 }
+)
+# Only open the raw port when it is actually enabled.
+if ($rawEnabled) { $rules += @{ Name = "ImageWriterII raw print"; Protocol = "TCP"; Port = $rawPort } }
+
+foreach ($rule in $rules) {
+    # Match on the stable name; older installs used a name with the port baked in, so clean those up too.
     $existingRule = Get-NetFirewallRule -DisplayName $rule.Name -ErrorAction SilentlyContinue
     if ($existingRule) {
-        # keep it in step with -FirewallProfile and with a moved install directory
-        $existingRule | Set-NetFirewallRule -Program $exe -Profile $FirewallProfile -Enabled True | Out-Null
+        # -LocalPort as well as -Program/-Profile, so a changed HttpPort or RawPort actually takes effect
+        $existingRule | Set-NetFirewallRule -Program $exe -Profile $FirewallProfile -Enabled True -LocalPort $rule.Port | Out-Null
     } else {
         New-NetFirewallRule -DisplayName $rule.Name -Direction Inbound -Action Allow -Protocol $rule.Protocol `
             -LocalPort $rule.Port -Program $exe -Profile $FirewallProfile | Out-Null
     }
 }
+# Remove rules this script no longer manages: the old port-suffixed names, and the raw-print rule when the
+# raw port has been turned off.
+$obsolete = @("ImageWriterII IPP (TCP 631)", "ImageWriterII mDNS (UDP 5353)", "ImageWriterII raw print (TCP 9100)")
+if (-not $rawEnabled) { $obsolete += "ImageWriterII raw print" }
+foreach ($name in $obsolete) {
+    Get-NetFirewallRule -DisplayName $name -ErrorAction SilentlyContinue | Remove-NetFirewallRule
+}
+
 $publicLan = Get-NetConnectionProfile -ErrorAction SilentlyContinue | Where-Object { $_.NetworkCategory -eq "Public" }
 if ($publicLan -and $FirewallProfile -notcontains "Any" -and $FirewallProfile -notcontains "Public") {
     Write-Warning "$($publicLan.InterfaceAlias -join ', ') is a Public network but the firewall rules exclude Public; iPhones/iPads on that network will not see or reach the printer."
@@ -137,15 +166,16 @@ Start-Service -Name $serviceName
 Start-Sleep -Seconds 3
 Get-Service -Name $serviceName | Format-Table -AutoSize
 
+$statusUrl = "http://localhost:$httpPort/"
 try {
-    $status = Invoke-RestMethod -Uri "http://localhost:631/api/status" -TimeoutSec 5
+    $status = Invoke-RestMethod -Uri "$statusUrl`api/status" -TimeoutSec 5
     Write-Host ("Service reports: {0}, {1} ribbon, port {2}" -f $status.state, $(if ($status.colorRibbon) { "four-colour" } else { "black" }), $status.port)
 } catch {
-    Write-Warning "The service is registered but did not answer on http://localhost:631/ yet. Check $InstallDir\logs."
+    Write-Warning "The service is registered but did not answer on $statusUrl yet. Check $InstallDir\logs."
 }
 
 Write-Host ""
-Write-Host "Done. Status page: http://localhost:631/" -ForegroundColor Green
+Write-Host "Done. Status page: $statusUrl" -ForegroundColor Green
 Write-Host "Add the printer with:  .\scripts\add-printer.ps1   (or Settings > Printers & scanners > Add device)"
 Write-Host "iPhone / iPad / Mac need no setup: the printer is announced over Bonjour as AirPrint."
 Write-Host "Logs: $InstallDir\logs"

@@ -6,4 +6,8 @@
   <ItemGroup>
     <PackageReference Include="System.IO.Ports" Version="10.0.11" />
   </ItemGroup>
+  <ItemGroup>
+    <!-- The serial write pacing and the ready-line gate are internal seams that exist to be tested. -->
+    <InternalsVisibleTo Include="ImageWriterII.Tests" />
+  </ItemGroup>
 </Project>

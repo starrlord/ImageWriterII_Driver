@@ -39,8 +39,18 @@ public sealed class MdnsResponder : IDisposable
 
     private readonly MdnsOptions _o;
     private readonly ILogger _log;
-    private readonly string _hostFqdn;
-    private readonly List<(string typeFqdn, string instanceFqdn, MdnsService svc, List<string> subtypeFqdns)> _services = [];
+    // Host and instance names can change: a probe that finds someone else already using them renames and
+    // probes again (RFC 6762 9). Both are published as snapshots because the receive loop reads them.
+    private volatile string _hostFqdn;
+    private volatile IReadOnlyList<ServiceRecords> _services = [];
+    private int _nameSuffix;                       // 0 = the configured name, 2 = "Name (2)" / "host-2", ...
+    /// <summary>Set once probing has claimed the names; until then RFC 6762 8.1 forbids answering with them.</summary>
+    private volatile bool _claimed;
+    /// <summary>Raised by the receive loop when a probe sees someone else already using a name we proposed.</summary>
+    private volatile bool _conflictSeen;
+    /// <summary>Serialises renaming: a burst of conflicting records must cause one rename, not one each.</summary>
+    private readonly object _renameLock = new();
+    private bool _renameInFlight;
     // Published as an immutable snapshot: the receive loop, the announce timer and the network-change
     // handler all read it, and a Dictionary being cleared and repopulated underneath them is not safe.
     private volatile IReadOnlyDictionary<int, InterfaceInfo> _interfaces = new Dictionary<int, InterfaceInfo>();
@@ -54,19 +64,41 @@ public sealed class MdnsResponder : IDisposable
     private Task? _loop;
 
     private sealed record InterfaceInfo(int Index, string Name, List<IPAddress> Addresses);
+    private sealed record ServiceRecords(string typeFqdn, string instanceFqdn, MdnsService svc, List<string> subtypeFqdns);
 
     public MdnsResponder(MdnsOptions options, ILogger logger)
     {
         _o = options;
         _log = logger;
-        _hostFqdn = options.HostLabel.TrimEnd('.') + ".local";
-        foreach (var svc in options.Services)
+        _hostFqdn = "";
+        BuildNames(0);
+    }
+
+    /// <summary>
+    /// (Re)builds the host name and the service instance names for the given rename suffix: 0 is the
+    /// configured name, 2 gives "ImageWriter II (2)" and "imagewriter-ii-2.local", and so on. This is the
+    /// DNS-SD convention (RFC 6763 9) and is what Bonjour shows users.
+    /// </summary>
+    private void BuildNames(int suffix)
+    {
+        _nameSuffix = suffix;
+        string host = _o.HostLabel.TrimEnd('.');
+        string instance = _o.InstanceName;
+        if (suffix >= 2)
+        {
+            host = $"{host}-{suffix}";
+            instance = $"{instance} ({suffix})";
+        }
+        _hostFqdn = host + ".local";
+        var built = new List<ServiceRecords>();
+        foreach (var svc in _o.Services)
         {
             string typeFqdn = svc.Type + ".local";
-            string instanceFqdn = EscapeInstance(options.InstanceName) + "." + typeFqdn;
-            var subs = svc.Subtypes.Select(s => $"{s}._sub.{typeFqdn}").ToList();
-            _services.Add((typeFqdn, instanceFqdn, svc, subs));
+            string instanceFqdn = EscapeInstance(instance) + "." + typeFqdn;
+            var subs = svc.Subtypes.Select(x => $"{x}._sub.{typeFqdn}").ToList();
+            built.Add(new ServiceRecords(typeFqdn, instanceFqdn, svc, subs));
         }
+        _services = built;
     }
 
     public string HostName => _hostFqdn;
@@ -105,6 +137,7 @@ public sealed class MdnsResponder : IDisposable
         socket.SetSocketOption(SocketOptionLevel.IP, SocketOptionName.MulticastLoopback, true);
         socket.Bind(new IPEndPoint(IPAddress.Any, 5353));
         _socket = socket;
+        _claimed = false;
         SyncMemberships();
         _cts = new CancellationTokenSource();
         _loop = Task.Run(() => LoopAsync(_cts.Token));
@@ -123,6 +156,7 @@ public sealed class MdnsResponder : IDisposable
         try { _loop?.Wait(TimeSpan.FromSeconds(2)); } catch (Exception) { /* ignore */ }
         _socket = null;
         _loop = null;
+        _claimed = false;
     }
 
     public void Dispose() => Stop();
@@ -245,9 +279,145 @@ public sealed class MdnsResponder : IDisposable
         foreach (var iface in _interfaces.Values.ToList())
         {
             var records = AllRecords(iface, goodbye).ToList();
-            var packet = DnsWire.BuildResponse(0, records, [], legacy: false);
-            SendMulticast(packet, iface);
+            // The full record set does not fit in one datagram; RFC 6762 8.3 lets it span several, which is
+            // better than emitting one oversized packet for IP to fragment.
+            foreach (var packet in DnsWire.BuildResponses(0, records, [], legacy: false))
+                SendMulticast(packet, iface);
         }
+    }
+
+    // ------------------------------------------------------------------ probing (RFC 6762 8.1, 9)
+
+    /// <summary>
+    /// Probes for the host name and every service instance name, renaming and retrying on conflict, until a
+    /// set of names is unused on the network. Sets <see cref="_claimed"/> when the names are ours to use.
+    /// </summary>
+    private async Task ProbeAsync(CancellationToken ct)
+    {
+        for (int attempt = 0; attempt < 12 && !ct.IsCancellationRequested; attempt++)
+        {
+            _conflictSeen = false;
+            try
+            {
+                // RFC 6762 8.1: wait a random 0-250 ms first, so simultaneously-booting devices do not
+                // probe in lockstep, then send three probes 250 ms apart.
+                await Task.Delay(_rng.Next(0, 250), ct);
+                for (int i = 0; i < 3 && !_conflictSeen; i++)
+                {
+                    SendProbe();
+                    await Task.Delay(250, ct);
+                }
+            }
+            catch (OperationCanceledException) { return; }
+            catch (Exception ex) { _log.LogDebug(ex, "mDNS probe failed"); }
+
+            if (!_conflictSeen)
+            {
+                _claimed = true;
+                if (_nameSuffix >= 2)
+                    _log.LogWarning("mDNS: name already in use on this network; renamed to host {Host}, instance {Instance}",
+                        _hostFqdn, string.Join(", ", _services.Select(x => x.instanceFqdn)));
+                else
+                    _log.LogInformation("mDNS: probed and claimed {Host}", _hostFqdn);
+                return;
+            }
+
+            NextName();
+            _log.LogInformation("mDNS: name conflict during probing, retrying as {Host}", _hostFqdn);
+        }
+        // Give up defending and use the last candidate rather than never appearing at all.
+        _claimed = true;
+        _log.LogWarning("mDNS: still conflicting after repeated renames; continuing as {Host}", _hostFqdn);
+    }
+
+    /// <summary>Advances to the next candidate name: "Name" -> "Name (2)" -> "Name (3)" (RFC 6763 9).</summary>
+    private void NextName() => BuildNames(_nameSuffix < 2 ? 2 : _nameSuffix + 1);
+
+    /// <summary>
+    /// One probe: a query for every name we intend to claim, QTYPE ANY, with the records we propose to use
+    /// in the authority section so a simultaneous prober can tie-break against us (RFC 6762 8.2).
+    /// </summary>
+    private void SendProbe()
+    {
+        foreach (var iface in _interfaces.Values.ToList())
+        {
+            var names = new List<string> { _hostFqdn };
+            names.AddRange(_services.Select(x => x.instanceFqdn));
+            var proposed = new List<DnsRecord>();
+            foreach (var (_, instanceFqdn, svc, _) in _services)
+            {
+                proposed.Add(DnsRecord.Srv(instanceFqdn, svc.Port, _hostFqdn, OtherTtl));
+                proposed.Add(DnsRecord.Txt(instanceFqdn, svc.Txt, OtherTtl));
+            }
+            proposed.AddRange(iface.Addresses.Select(a => DnsRecord.AddressV4(_hostFqdn, a, OtherTtl)));
+            foreach (var packet in DnsWire.BuildProbe(names, proposed))
+                SendMulticast(packet, iface);
+        }
+    }
+
+    /// <summary>
+    /// Looks at an incoming response for records that clash with names we are probing for or already own:
+    /// same name, same type, different rdata.
+    ///
+    /// Our own multicast comes back to us (MulticastLoopback is on), so echoes have to be filtered out — but
+    /// NOT by source address. Two responders on one machine share every source address, so an address filter
+    /// would hide exactly the conflict it is meant to catch. Comparing the rdata to what we would have sent
+    /// is the discriminator that works in both cases: an echo matches ours exactly, a rival's does not.
+    /// </summary>
+    private void CheckForConflict(DnsPacket packet, IPEndPoint from)
+    {
+        var mine = new HashSet<string>(StringComparer.OrdinalIgnoreCase) { _hostFqdn };
+        foreach (var x in _services) mine.Add(x.instanceFqdn);
+
+        foreach (var a in packet.Answers)
+        {
+            if (a.Type is not (DnsType.A or DnsType.SRV or DnsType.TXT)) continue;
+            if (!mine.Contains(a.Name)) continue;
+            if (OwnRecordMatches(a)) continue;            // identical data: not a conflict, just a duplicate view
+
+            if (!_claimed)
+            {
+                _conflictSeen = true;
+                return;
+            }
+            // RFC 6762 9: a conflict after claiming means someone else took the name; re-probe under a new one.
+            lock (_renameLock)
+            {
+                if (_renameInFlight) return;      // a rename is already running; one conflict, one rename
+                _renameInFlight = true;
+            }
+            _log.LogWarning("mDNS: {Name} ({Type}) is also claimed by {Peer}; renaming", a.Name, a.Type, from.Address);
+            _claimed = false;
+            var ct = _cts?.Token ?? CancellationToken.None;
+            _ = Task.Run(async () =>
+            {
+                try
+                {
+                    NextName();
+                    await ProbeAsync(ct);
+                    Announce();
+                }
+                finally
+                {
+                    lock (_renameLock) _renameInFlight = false;
+                }
+            }, ct);
+            return;
+        }
+    }
+
+    /// <summary>True when the record carries exactly what we would have sent for that name and type.</summary>
+    private bool OwnRecordMatches(DnsRecord incoming)
+    {
+        foreach (var iface in _interfaces.Values)
+        {
+            foreach (var r in AllRecords(iface, goodbye: false))
+            {
+                if (r.Type != incoming.Type || !r.Name.Equals(incoming.Name, StringComparison.OrdinalIgnoreCase)) continue;
+                if (r.Data.AsSpan().SequenceEqual(incoming.Data)) return true;
+            }
+        }
+        return false;
     }
 
     // ------------------------------------------------------------------ receive loop
@@ -258,6 +428,9 @@ public sealed class MdnsResponder : IDisposable
         var buffer = new byte[9000];
         var announceTimer = Task.Run(async () =>
         {
+            // RFC 6762 8.1: probe before claiming any unique record, so we never fight another responder
+            // for a name. Only after that may we announce or answer with these names.
+            await ProbeAsync(ct);
             // RFC 6762 8.3: announce at least twice, one second apart; repeat occasionally for clients that lost cache.
             for (int i = 0; i < 3 && !ct.IsCancellationRequested; i++)
             {
@@ -302,7 +475,15 @@ public sealed class MdnsResponder : IDisposable
     private void HandlePacket(ReadOnlySpan<byte> data, IPEndPoint from, int interfaceIndex)
     {
         var packet = DnsWire.Parse(data);
-        if (!packet.IsQuery || packet.Questions.Count == 0) return;
+        if (!packet.IsQuery)
+        {
+            // Responses are where name conflicts show up; ignoring them is why conflicts used to be invisible.
+            CheckForConflict(packet, from);
+            return;
+        }
+        if (packet.Questions.Count == 0) return;
+        // RFC 6762 8.1: until probing has claimed the names, do not answer with them.
+        if (!_claimed) return;
 
         var interfaces = _interfaces;
         if (!interfaces.TryGetValue(interfaceIndex, out var iface))
@@ -379,13 +560,13 @@ public sealed class MdnsResponder : IDisposable
 
         if (legacy)
         {
-            var packetBytes = DnsWire.BuildResponse(packet.Id, answers, additionals, legacy: true);
-            SendUnicast(packetBytes, from, iface);
+            foreach (var packetBytes in DnsWire.BuildResponses(packet.Id, answers, additionals, legacy: true))
+                SendUnicast(packetBytes, from, iface);
             return;
         }
 
-        var response = DnsWire.BuildResponse(0, answers, additionals, legacy: false);
-        if (wantUnicast) SendUnicast(response, from, iface);
+        var responses = DnsWire.BuildResponses(0, answers, additionals, legacy: false);
+        if (wantUnicast) foreach (var r in responses) SendUnicast(r, from, iface);
 
         // Rate-limit multicast replies for the same records to once per second (RFC 6762 6).
         string key = iface.Index + ":" + string.Join("|", answers.Select(a => a.Type + a.Name).OrderBy(x => x));
@@ -398,11 +579,17 @@ public sealed class MdnsResponder : IDisposable
         if (wantUnicast && !shared) return;
 
         int delay = shared ? _rng.Next(20, 120) : 0;
-        if (delay == 0) SendMulticast(response, iface);
+        if (delay == 0)
+        {
+            foreach (var r in responses) SendMulticast(r, iface);
+        }
         else
         {
             var capturedIface = iface;
-            _ = Task.Delay(delay).ContinueWith(_ => SendMulticast(response, capturedIface), TaskScheduler.Default);
+            _ = Task.Delay(delay).ContinueWith(_ =>
+            {
+                foreach (var r in responses) SendMulticast(r, capturedIface);
+            }, TaskScheduler.Default);
         }
     }
 
