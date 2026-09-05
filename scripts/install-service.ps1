@@ -168,7 +168,9 @@ Get-Service -Name $serviceName | Format-Table -AutoSize
 
 $statusUrl = "http://localhost:$httpPort/"
 try {
-    $status = Invoke-RestMethod -Uri "$statusUrl`api/status" -TimeoutSec 5
+    # ${...} rather than a backtick: "$statusUrl`api/..." makes PowerShell read `a as the alert escape (BEL),
+    # which silently produced http://localhost:631/<BEL>pi/status and a spurious "did not answer" warning.
+    $status = Invoke-RestMethod -Uri "${statusUrl}api/status" -TimeoutSec 5
     Write-Host ("Service reports: {0}, {1} ribbon, port {2}" -f $status.state, $(if ($status.colorRibbon) { "four-colour" } else { "black" }), $status.port)
 } catch {
     Write-Warning "The service is registered but did not answer on $statusUrl yet. Check $InstallDir\logs."
