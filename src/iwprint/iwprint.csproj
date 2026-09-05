@@ -1,0 +1,14 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <RootNamespace>ImageWriterII.Cli</RootNamespace>
+    <AssemblyName>iwprint</AssemblyName>
+    <Description>Command-line tool for the ImageWriter II: print text/images/test pages, query the printer, render escape streams, drive the IPP service.</Description>
+    <RuntimeIdentifiers>win-x64;win-arm64</RuntimeIdentifiers>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\ImageWriterII.Core\ImageWriterII.Core.csproj" />
+    <ProjectReference Include="..\ImageWriterII.Ipp\ImageWriterII.Ipp.csproj" />
+    <PackageReference Include="System.Drawing.Common" Version="10.0.11" />
+  </ItemGroup>
+</Project>

@@ -1,0 +1,11 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <RootNamespace>ImageWriterII.Ipp</RootNamespace>
+    <Description>IPP Everywhere printer implementation (IPP protocol, job spooling, DNS-SD discovery) for the ImageWriter II.</Description>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\ImageWriterII.Core\ImageWriterII.Core.csproj" />
+    <PackageReference Include="Microsoft.Extensions.Logging.Abstractions" Version="10.0.0" />
+    <PackageReference Include="Microsoft.Extensions.Hosting.Abstractions" Version="10.0.0" />
+  </ItemGroup>
+</Project>

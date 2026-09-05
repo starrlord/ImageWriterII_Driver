@@ -1,0 +1,11 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/ImageWriterII.Core/ImageWriterII.Core.csproj" />
+    <Project Path="src/ImageWriterII.Ipp/ImageWriterII.Ipp.csproj" />
+    <Project Path="src/ImageWriterII.Service/ImageWriterII.Service.csproj" />
+    <Project Path="src/iwprint/iwprint.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/ImageWriterII.Tests/ImageWriterII.Tests.csproj" />
+  </Folder>
+</Solution>

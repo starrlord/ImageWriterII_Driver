@@ -1,0 +1,9 @@
+bin/
+obj/
+*.user
+.vs/
+spool/
+logs/
+TestResults/
+publish/
+test-output/
