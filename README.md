@@ -25,6 +25,12 @@ Everything is derived from the *Apple ImageWriter II Technical Reference Manual*
 `docs/printer-protocol.md`), and every escape stream the encoder produces is checked dot-for-dot
 by a built-in printer simulator in the unit tests.
 
+All of which was put to immediate and decisive use:
+
+<img src="assets/lulz.png" width="380" alt="ASCII-art Bart Simpson printed on fanfold tractor paper, signed '-lulz-  -StarrLord 2026-'">
+
+That is the last row of the table. Only the last row.
+
 The service's own status page, which is also what `printer-more-info` and the Bonjour `adminurl` point at:
 
 <img src="assets/printer_status.png" width="460" alt="The service's status page, showing printer state, ribbon, resolutions and the job list">
@@ -319,7 +325,7 @@ src/iwprint                command-line tool: test pages, images, text, identity
 tests/                     xunit tests (encoder round trips through the simulator, codecs, IPP, DNS)
 scripts/                   install-service.ps1, uninstall-service.ps1, add-printer.ps1, remove-printer.ps1
 docs/                      hardware-setup.md (cable, DIP switches), printer-protocol.md (what is sent and why)
-assets/                    screenshots used by this README
+assets/                    screenshots and output photos used by this README
 ```
 
 ## Troubleshooting
