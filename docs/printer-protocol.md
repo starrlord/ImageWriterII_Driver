@@ -89,8 +89,17 @@ Vertically the top-of-form is the sheet's top edge, so leading blank rows simply
 
 ## Halftoning
 
-Windows renders `sgray_8`/`srgb_8` (8-bit) PWG raster when offered, so the service dithers itself
-(Floyd-Steinberg, serpentine) after applying a dot-gain curve: the printer's dots are much larger than
-the 1/144" grid, so mid-tones are lightened with `coverage^Gamma` (default 1.8). If a client sends
-`black_1` it is already bilevel and printed as-is. Colour pages are separated with full grey-component
-replacement so neutral tones use only the black band.
+Which raster arrives depends on the client's colour setting. Windows' *Color Printing Mode* dropdown maps
+straight onto the wire format, confirmed against a real ImageWriter II:
+
+| Windows setting | Arrives as | Handled by |
+|---|---|---|
+| Mono | 1-bit bilevel, logged as `Sw/1 bpp` | `RasterPageBuilder.CopyBilevel`, straight through, `1` = white so the plane is inverted |
+| Grayscale | 8-bit grey, `Sw/8 bpp` | `Halftone.DitherGray` |
+| Color | 24-bit sRGB, `Srgb/24 bpp` | `Halftone.DitherRgbToYmck` |
+
+For the 8-bit paths the service dithers itself (Floyd-Steinberg, serpentine) after applying a dot-gain curve:
+the printer's dots are much larger than the 1/144" grid, so mid-tones are lightened with `coverage^Gamma`
+(default 1.8, taking a 50% grey to roughly 28% coverage). Bilevel data is already halftoned by the client and
+is printed as-is, so the curve never touches it, which is why Mono prints noticeably darker than Grayscale.
+Colour pages are separated with full grey-component replacement so neutral tones use only the black band.

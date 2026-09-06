@@ -140,7 +140,9 @@ line, Mini-DIN-8 pin 5. Most cables of this kind omit it, which is why the servi
 
 4. **Print.** Print quality in the Windows dialog maps to the resolutions the service offers
    (72x72 draft, 144x144 default, 160x144 best). Paper sizes come from `MediaSupported`.
-   iPhone, iPad and Mac need no setup at all — see [AirPrint](#airprint-from-iphone-ipad-and-mac).
+   With a black ribbon, also see [Mono or Grayscale](#mono-or-grayscale), which is the setting that
+   decides how dark your pages come out. iPhone, iPad and Mac need no setup at all — see
+   [AirPrint](#airprint-from-iphone-ipad-and-mac).
 
 ### Console mode and testing without paper
 
@@ -248,6 +250,40 @@ Private and you would rather it stayed that way.
   app or an Android client that can only emit PDF will not work.
 * **One document per job**, no duplex, no stapling — it is a 1985 dot-matrix printer.
 
+## Mono or Grayscale
+
+Windows' *Color Printing Mode* dropdown (Printing preferences > Advanced) is the biggest lever you have over
+how dark a page prints, and the two monochrome options are not cosmetic variants of each other. They send
+completely different data:
+
+| Setting | What the service receives | Who halftones | Result |
+|---|---|---|---|
+| **Mono** | 1-bit bilevel (`Sw/1 bpp`) | Windows | Bits go straight to the printer. The service's dot-gain curve never runs. |
+| **Grayscale** | 8-bit grey (`Sw/8 bpp`) | the service | Floyd-Steinberg error diffusion after a `Halftone.Gamma` curve that deliberately lightens mid-tones |
+
+So **Mono prints darker**. `Halftone.Gamma` defaults to 1.8, which takes a 50% grey down to about 28% ink
+coverage to compensate for the printer's dots being much larger than the 1/144" grid. Mono skips that
+entirely and prints whatever Windows halftoned, which has no such compensation.
+
+Pick by content:
+
+* **Text and line art: Mono.** Solid black either way, but no dithering noise around glyph edges, and the
+  job is a little smaller.
+* **Photographs and gradients: Grayscale.** Floyd-Steinberg resolves tone far better than Windows' halftone.
+  If the result is too pale, lower `Halftone.Gamma` towards 1.2 rather than switching to Mono; that keeps the
+  smooth gradients and just puts more ink down.
+
+The service log names the format of every job, so you never have to guess which one you got:
+
+```
+Job 1 page 1: 1224x1584 px, 144x144 dpi, Sw/1 bpp, ...     <- Mono
+Job 1 page 1: 1224x1584 px, 144x144 dpi, Sw/8 bpp, ...     <- Grayscale
+Job 1 page 1: 1224x1584 px, 144x144 dpi, Srgb/24 bpp, ...  <- Color
+```
+
+A **Color** option only appears in that dropdown when the service is advertising a colour ribbon. If it is
+missing, see [Colour printing](#colour-printing).
+
 ## Colour printing
 
 The four-colour ribbon is the default. `install-service.ps1` writes `"Ribbon": "Color"` into
@@ -342,6 +378,11 @@ assets/                    screenshots and output photos used by this README
 * **Garbage or missing chunks.** Flow control is not working (see above). As a stop-gap set
   `Serial.MaxBytesPerSecond` to 600; the printer's 2K buffer then never overruns at print speed.
 * **Output shifted left/right.** Adjust `Encoder.LeftEdgeOffsetInches` using the test page border.
+* **Pages look washed out or too light.** Solid black text is purely mechanical (ribbon condition and the
+  head gap lever); nothing in software changes how hard a pin strikes. Shaded areas are a different matter:
+  they run through `Halftone.Gamma`, which is 1.8 by default and lightens mid-tones on purpose. Either switch
+  Windows to **Mono**, which bypasses the curve altogether, or lower `Halftone.Gamma` towards 1.2. See
+  [Mono or Grayscale](#mono-or-grayscale).
 * **Every print starts part-way down the page, typically about a quarter.** You are tearing sheets off. The
   tear edge sits a few inches past the print head, so once you tear, the top of the next sheet is left at the
   tear edge with the head already that far into the page, and top of form gets set there. Set
